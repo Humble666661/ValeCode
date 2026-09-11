@@ -1,0 +1,14 @@
+config.yaml
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.idea/
+.vscode/
+.valecode/
+.claude/
+CLAUDE.md

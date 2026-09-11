@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ from valecode.persistence import (
     ToolCallStatus,
 )
 from valecode.runtime.idempotency import make_tool_idempotency_key
+from valecode.observability import Tracing, get_tracing
 from valecode.hooks import HookContext, HookEngine, ToolRejectedError
 from valecode.hooks.engine import HookNotification
 from valecode.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
@@ -319,6 +321,7 @@ class Agent:
         run_store: RunStore | None = None,
         provider_name: str | None = None,
         model: str | None = None,
+        tracing: Tracing | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -345,6 +348,7 @@ class Agent:
         self.run_store = run_store
         self.provider_name = provider_name
         self.model = model
+        self.tracing = tracing or get_tracing()
         self._current_run_id: str | None = None
         self._current_trace_id: str | None = None
         self._resume_run_id: str | None = None
@@ -481,6 +485,9 @@ class Agent:
         self._current_step_id = None
         self._control_tool_ids = {}
         if self.run_store is None or not self.session_id:
+            # Standalone/test agents still need a stable request trace so any
+            # Sub-Agent launched during this run can join the same trace.
+            self._current_trace_id = self.trace_id or uuid.uuid4().hex
             return
         if self._resume_run_id is not None:
             resume_run_id = self._resume_run_id
@@ -724,34 +731,156 @@ class Agent:
             return None
         return str(self.session_dir / "tool-results" / f"{provider_tool_id}.txt")
 
+    def _trace_attributes(self) -> dict[str, Any]:
+        return {
+            "trace.id": self._current_trace_id or self.trace_id or "",
+            "session.id": self.session_id,
+            "run.id": self._current_run_id or "",
+            "step.id": self._current_step_id or "",
+            "agent.id": self.agent_id,
+            "agent.parent_id": self.parent_id or "",
+        }
+
+    async def _consume_llm_stream(
+        self, collector: StreamCollector, llm_stream: AsyncIterator[StreamEvent]
+    ) -> AsyncIterator[AgentEvent]:
+        started = time.monotonic()
+        first_event_at: float | None = None
+        trace_context = self.tracing.span(
+            "llm.stream",
+            {
+                **self._trace_attributes(),
+                "provider.name": self.provider_name or "",
+                "model.name": self.model or "",
+            },
+        )
+        span = trace_context.__enter__()
+        try:
+            async for event in collector.consume(llm_stream):
+                if first_event_at is None:
+                    first_event_at = time.monotonic()
+                yield event
+        except BaseException:
+            trace_context.__exit__(*sys.exc_info())
+            raise
+        else:
+            response = collector.response
+            finished = time.monotonic()
+            span.set_attributes(
+                {
+                    "llm.duration_ms": round((finished - started) * 1000, 3),
+                    "llm.ttft_ms": (
+                        round((first_event_at - started) * 1000, 3)
+                        if first_event_at is not None
+                        else -1
+                    ),
+                    "llm.input_tokens": response.input_tokens,
+                    "llm.output_tokens": response.output_tokens,
+                    "llm.cache_read_tokens": response.cache_read,
+                    "llm.cache_creation_tokens": response.cache_creation,
+                    "llm.stop_reason": response.stop_reason or "",
+                }
+            )
+            trace_context.__exit__(None, None, None)
+
+    async def _auto_compact_with_trace(
+        self,
+        conversation: ConversationManager,
+        *,
+        manual: bool = False,
+    ) -> CompactEvent | str | None:
+        started = time.monotonic()
+        with self.tracing.span(
+            "context.compact",
+            {**self._trace_attributes(), "compact.manual": manual},
+        ) as span:
+            result = await auto_compact(
+                conversation,
+                self.client,
+                self.context_window,
+                self.session_dir,
+                protocol=self.protocol,
+                manual=manual,
+                breaker=self.compact_breaker,
+                recovery=self.recovery_state,
+                tool_schemas=self.registry.get_all_schemas(self.protocol),
+                transcript_path=self._transcript_path,
+            )
+            span.set_attributes(
+                {
+                    "compact.duration_ms": round(
+                        (time.monotonic() - started) * 1000, 3
+                    ),
+                    "compact.outcome": (
+                        "compacted"
+                        if isinstance(result, CompactEvent)
+                        else "error" if isinstance(result, str) else "skipped"
+                    ),
+                    "compact.before_tokens": (
+                        result.before_tokens if isinstance(result, CompactEvent) else 0
+                    ),
+                }
+            )
+            return result
+
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._start_control_run(conversation)
+        run_id = self._current_run_id
+        trace_id = self._current_trace_id
+        trace_context = self.tracing.span(
+            "agent.run",
+            {
+                "session.id": self.session_id,
+                "run.id": run_id or "",
+                "agent.id": self.agent_id,
+                "agent.parent_id": self.parent_id or "",
+                "provider.name": self.provider_name or "",
+                "model.name": self.model or "",
+                "input": self._latest_user_input(conversation),
+            },
+            trace_id=trace_id,
+        )
+        run_span = trace_context.__enter__()
         completed = False
+        run_status = "running"
         try:
             async for event in self._run_loop(conversation):
                 if isinstance(event, LoopComplete):
                     completed = True
                 yield event
         except asyncio.CancelledError:
+            run_status = "cancelled"
             self._cancel_control_tools()
             self._finish_control_step(StepStatus.CANCELLED, error="Agent run cancelled")
             self._finish_control_run(RunStatus.CANCELLED, error="Agent run cancelled")
             raise
         except Exception as exc:
+            run_status = "failed"
             message = f"{type(exc).__name__}: {exc}"
             self._finish_control_step(StepStatus.FAILED, error=message)
             self._finish_control_run(RunStatus.FAILED, error=message)
             raise
         else:
             if completed:
+                run_status = "completed"
                 self._finish_control_run(RunStatus.COMPLETED)
             else:
+                run_status = "interrupted"
                 self._finish_control_step(
                     StepStatus.INTERRUPTED, error="Agent loop ended without completion"
                 )
                 self._finish_control_run(
                     RunStatus.INTERRUPTED, error="Agent loop ended without completion"
                 )
+        finally:
+            run_span.set_attributes(
+                {
+                    "run.status": run_status,
+                    "usage.input_tokens": self.total_input_tokens,
+                    "usage.output_tokens": self.total_output_tokens,
+                }
+            )
+            trace_context.__exit__(*sys.exc_info())
 
     async def _run_loop(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
@@ -845,17 +974,7 @@ class Agent:
 
             # Layer 2: 接近 context window 上限时自动 compact
             # tool-result budget 已就地修改 conversation，直接用 conversation.history 估算
-            compact_result = await auto_compact(
-                conversation,
-                self.client,
-                self.context_window,
-                self.session_dir,
-                protocol=self.protocol,
-                breaker=self.compact_breaker,
-                recovery=self.recovery_state,
-                tool_schemas=self.registry.get_all_schemas(self.protocol),
-                transcript_path=self._transcript_path,
-            )
+            compact_result = await self._auto_compact_with_trace(conversation)
             if isinstance(compact_result, CompactEvent):
                 yield CompactNotification(
                     before_tokens=compact_result.before_tokens,
@@ -877,7 +996,7 @@ class Agent:
             self._start_control_step(iteration)
             collector = StreamCollector()
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
-            async for event in collector.consume(llm_stream):
+            async for event in self._consume_llm_stream(collector, llm_stream):
                 yield event
 
             response = collector.response
@@ -1222,6 +1341,32 @@ class Agent:
     async def _execute_single_tool_direct(
         self, tc: ToolCallComplete
     ) -> _ToolExecResult:
+        with self.tracing.span(
+            "tool.execute",
+            {
+                **self._trace_attributes(),
+                "tool.name": tc.tool_name,
+                "tool.call_id": tc.tool_id,
+                "tool.arguments": tc.arguments,
+                "tool.concurrent": True,
+            },
+        ) as span:
+            executed = await self._execute_single_tool_direct_untraced(tc)
+            span.set_attributes(
+                {
+                    "tool.duration_ms": round(executed.elapsed * 1000, 3),
+                    "tool.is_error": executed.result.is_error,
+                    "tool.is_unknown": executed.is_unknown,
+                    "tool.output": executed.result.output,
+                }
+            )
+            if executed.result.is_error:
+                span.set_error(executed.result.output)
+            return executed
+
+    async def _execute_single_tool_direct_untraced(
+        self, tc: ToolCallComplete
+    ) -> _ToolExecResult:
         tool = self.registry.get(tc.tool_name)
         start = time.monotonic()
 
@@ -1271,6 +1416,41 @@ class Agent:
     async def _execute_tool(
         self, tc: ToolCallComplete
     ) -> AsyncIterator[tuple[ToolResult, float, bool]]:
+        trace_context = self.tracing.span(
+            "tool.execute",
+            {
+                **self._trace_attributes(),
+                "tool.name": tc.tool_name,
+                "tool.call_id": tc.tool_id,
+                "tool.arguments": tc.arguments,
+                "tool.concurrent": False,
+            },
+        )
+        span = trace_context.__enter__()
+        try:
+            async for item in self._execute_tool_untraced(tc):
+                if not isinstance(item, PermissionRequest):
+                    result, elapsed, is_unknown = item
+                    span.set_attributes(
+                        {
+                            "tool.duration_ms": round(elapsed * 1000, 3),
+                            "tool.is_error": result.is_error,
+                            "tool.is_unknown": is_unknown,
+                            "tool.output": result.output,
+                        }
+                    )
+                    if result.is_error:
+                        span.set_error(result.output)
+                yield item
+        except BaseException:
+            trace_context.__exit__(*sys.exc_info())
+            raise
+        else:
+            trace_context.__exit__(None, None, None)
+
+    async def _execute_tool_untraced(
+        self, tc: ToolCallComplete
+    ) -> AsyncIterator[PermissionRequest | tuple[ToolResult, float, bool]]:
         tool = self.registry.get(tc.tool_name)
         start = time.monotonic()
         is_unknown = False
@@ -1295,7 +1475,21 @@ class Agent:
 
         # 权限检查
         if self.permission_checker:
-            decision = self.permission_checker.check(tool, tc.arguments)
+            with self.tracing.span(
+                "permission.evaluate",
+                {
+                    **self._trace_attributes(),
+                    "tool.name": tc.tool_name,
+                    "tool.call_id": tc.tool_id,
+                },
+            ) as permission_span:
+                decision = self.permission_checker.check(tool, tc.arguments)
+                permission_span.set_attributes(
+                    {
+                        "permission.effect": decision.effect,
+                        "permission.reason": decision.reason,
+                    }
+                )
 
             if decision.effect == "deny":
                 result = ToolResult(
@@ -1324,7 +1518,16 @@ class Agent:
                     description=desc,
                     future=future,
                 )
-                response = await future
+                with self.tracing.span(
+                    "permission.wait",
+                    {
+                        **self._trace_attributes(),
+                        "tool.name": tc.tool_name,
+                        "tool.call_id": tc.tool_id,
+                    },
+                ) as wait_span:
+                    response = await future
+                    wait_span.set_attributes({"permission.response": response.value})
                 self._finish_control_run(RunStatus.RUNNING)
                 self._finish_control_step(StepStatus.RUNNING)
 
@@ -1424,18 +1627,7 @@ class Agent:
         # （原始或已替换的）都将被丢弃。这里跳过 apply_tool_result_budget —
         # 它在主循环中的唯一目的是为 LLM 调用生成 api_conv，而本路径不需要
         # 发起看到替换结果的 LLM 调用（auto_compact 内部的摘要调用操作的是原始对话）。
-        result = await auto_compact(
-            conversation,
-            self.client,
-            self.context_window,
-            self.session_dir,
-            protocol=self.protocol,
-            manual=True,
-            breaker=self.compact_breaker,
-            recovery=self.recovery_state,
-            tool_schemas=self.registry.get_all_schemas(self.protocol),
-            transcript_path=self._transcript_path,
-        )
+        result = await self._auto_compact_with_trace(conversation, manual=True)
         if isinstance(result, CompactEvent):
             env_context = build_environment_context(
             self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
@@ -1459,30 +1651,62 @@ class Agent:
         if conversation is None:
             conversation = ConversationManager()
         self._start_control_run(conversation, input_text=task)
+        run_id = self._current_run_id
+        trace_context = self.tracing.span(
+            "agent.run",
+            {
+                "session.id": self.session_id,
+                "run.id": run_id or "",
+                "agent.id": self.agent_id,
+                "agent.parent_id": self.parent_id or "",
+                "provider.name": self.provider_name or "",
+                "model.name": self.model or "",
+                "input": task,
+                "agent.non_interactive": True,
+            },
+            trace_id=self._current_trace_id,
+        )
+        run_span = trace_context.__enter__()
+        completed = False
+        run_status = "running"
         try:
             result, completed = await self._run_to_completion_loop(
                 task, conversation, event_callback
             )
         except asyncio.CancelledError:
+            run_status = "cancelled"
             self._cancel_control_tools()
             self._finish_control_step(StepStatus.CANCELLED, error="Agent run cancelled")
             self._finish_control_run(RunStatus.CANCELLED, error="Agent run cancelled")
             raise
         except Exception as exc:
+            run_status = "failed"
             message = f"{type(exc).__name__}: {exc}"
             self._finish_control_step(StepStatus.FAILED, error=message)
             self._finish_control_run(RunStatus.FAILED, error=message)
             raise
-        if completed:
-            self._finish_control_run(RunStatus.COMPLETED)
         else:
-            self._finish_control_step(
-                StepStatus.INTERRUPTED, error="Agent loop ended without completion"
+            if completed:
+                run_status = "completed"
+                self._finish_control_run(RunStatus.COMPLETED)
+            else:
+                run_status = "interrupted"
+                self._finish_control_step(
+                    StepStatus.INTERRUPTED, error="Agent loop ended without completion"
+                )
+                self._finish_control_run(
+                    RunStatus.INTERRUPTED, error="Agent loop ended without completion"
+                )
+            return result
+        finally:
+            run_span.set_attributes(
+                {
+                    "run.status": run_status,
+                    "usage.input_tokens": self.total_input_tokens,
+                    "usage.output_tokens": self.total_output_tokens,
+                }
             )
-            self._finish_control_run(
-                RunStatus.INTERRUPTED, error="Agent loop ended without completion"
-            )
-        return result
+            trace_context.__exit__(*sys.exc_info())
 
     async def _run_to_completion_loop(
         self, task: str, conversation: ConversationManager | None = None,
@@ -1547,17 +1771,7 @@ class Agent:
             if pre_compact_records:
                 append_replacement_records(self.session_dir, pre_compact_records)
 
-            compact_result = await auto_compact(
-                conversation,
-                self.client,
-                self.context_window,
-                self.session_dir,
-                protocol=self.protocol,
-                breaker=self.compact_breaker,
-                recovery=self.recovery_state,
-                tool_schemas=self.registry.get_all_schemas(self.protocol),
-                transcript_path=self._transcript_path,
-            )
+            compact_result = await self._auto_compact_with_trace(conversation)
             if isinstance(compact_result, CompactEvent):
                 conversation.inject_environment(env_context)
 
@@ -1580,7 +1794,7 @@ class Agent:
             self._start_control_step(iteration)
             collector = StreamCollector()
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
-            async for _event in collector.consume(llm_stream):
+            async for _event in self._consume_llm_stream(collector, llm_stream):
                 pass
 
             response = collector.response
@@ -1690,6 +1904,34 @@ class Agent:
     async def _execute_tool_noninteractive(
         self, tc: ToolCallComplete
     ) -> ToolResult:
+        started = time.monotonic()
+        with self.tracing.span(
+            "tool.execute",
+            {
+                **self._trace_attributes(),
+                "tool.name": tc.tool_name,
+                "tool.call_id": tc.tool_id,
+                "tool.arguments": tc.arguments,
+                "tool.non_interactive": True,
+            },
+        ) as span:
+            result = await self._execute_tool_noninteractive_untraced(tc)
+            span.set_attributes(
+                {
+                    "tool.duration_ms": round(
+                        (time.monotonic() - started) * 1000, 3
+                    ),
+                    "tool.is_error": result.is_error,
+                    "tool.output": result.output,
+                }
+            )
+            if result.is_error:
+                span.set_error(result.output)
+            return result
+
+    async def _execute_tool_noninteractive_untraced(
+        self, tc: ToolCallComplete
+    ) -> ToolResult:
         tool = self.registry.get(tc.tool_name)
 
         if tool is None:
@@ -1719,7 +1961,22 @@ class Agent:
                 )
 
         if self.permission_checker:
-            decision = self.permission_checker.check(tool, tc.arguments)
+            with self.tracing.span(
+                "permission.evaluate",
+                {
+                    **self._trace_attributes(),
+                    "tool.name": tc.tool_name,
+                    "tool.call_id": tc.tool_id,
+                    "permission.non_interactive": True,
+                },
+            ) as permission_span:
+                decision = self.permission_checker.check(tool, tc.arguments)
+                permission_span.set_attributes(
+                    {
+                        "permission.effect": decision.effect,
+                        "permission.reason": decision.reason,
+                    }
+                )
             if decision.effect == "deny":
                 return ToolResult(
                     output=f"Permission denied: {decision.reason}",

@@ -14,6 +14,7 @@ from valecode.persistence import (
     ToolCallState,
     ToolCallStatus,
 )
+from valecode.observability import get_tracing
 from valecode.runtime.idempotency import FileEffectState, inspect_file_effect
 
 
@@ -63,6 +64,17 @@ class RecoveryService:
         self.sessions_dir = self.work_dir / ".valecode" / "sessions"
 
     def scan_and_reconcile(self) -> RecoveryReport:
+        with get_tracing().span("task.recover") as span:
+            report = self._scan_and_reconcile()
+            span.set_attributes(
+                {
+                    "recovery.run_count": len(report.runs),
+                    "recovery.requires_confirmation": report.requires_confirmation,
+                }
+            )
+            return report
+
+    def _scan_and_reconcile(self) -> RecoveryReport:
         recovered: list[RunRecovery] = []
         for run in self.run_store.list_unfinished_runs():
             steps = self.run_store.list_steps(run.id)

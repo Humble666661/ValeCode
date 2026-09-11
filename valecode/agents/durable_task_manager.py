@@ -58,34 +58,48 @@ class DurableTaskManager(TaskManager):
         dependencies: list[str] | None = None,
         max_attempts: int = 3,
     ) -> str:
-        task_id = uuid.uuid4().hex[:8]
-        bg = BackgroundTask(
-            id=task_id,
-            name=name or task_id,
-            agent=agent,
-            task=task,
-            status="queued",
-        )
-        self._tasks[task_id] = bg
-        self.task_store.create(
-            {"task": task, "name": bg.name},
-            task_id=task_id,
-            session_id=agent.session_id or None,
-            run_id=agent._current_run_id,
-            team_name=agent.team_name or None,
-            max_attempts=max_attempts,
-            dependencies=dependencies,
-            metadata={
-                "forked": fork_conversation is not None,
-                "worktree_path": (
-                    agent.work_dir if isinstance(getattr(agent, "work_dir", None), str) else ""
-                ),
+        with agent.tracing.span(
+            "task.schedule",
+            {
+                "session.id": agent.session_id,
+                "run.id": agent._current_run_id or "",
+                "agent.id": agent.agent_id,
+                "task.name": name,
+                "task.dependencies": dependencies or [],
+                "task.max_attempts": max_attempts,
             },
-        )
-        handle = asyncio.create_task(self._run_durable(task_id, fork_conversation))
-        self._async_tasks[task_id] = handle
-        bg.cancel = handle.cancel
-        return task_id
+        ) as span:
+            task_id = uuid.uuid4().hex[:8]
+            bg = BackgroundTask(
+                id=task_id,
+                name=name or task_id,
+                agent=agent,
+                task=task,
+                status="queued",
+            )
+            self._tasks[task_id] = bg
+            self.task_store.create(
+                {"task": task, "name": bg.name},
+                task_id=task_id,
+                session_id=agent.session_id or None,
+                run_id=agent._current_run_id,
+                team_name=agent.team_name or None,
+                max_attempts=max_attempts,
+                dependencies=dependencies,
+                metadata={
+                    "forked": fork_conversation is not None,
+                    "worktree_path": (
+                        agent.work_dir
+                        if isinstance(getattr(agent, "work_dir", None), str)
+                        else ""
+                    ),
+                },
+            )
+            handle = asyncio.create_task(self._run_durable(task_id, fork_conversation))
+            self._async_tasks[task_id] = handle
+            bg.cancel = handle.cancel
+            span.set_attributes({"task.id": task_id})
+            return task_id
 
     async def _claim_when_ready(self, bg: BackgroundTask) -> bool:
         while True:
@@ -127,21 +141,38 @@ class DurableTaskManager(TaskManager):
             team_capacity = self._team_capacity.setdefault(
                 team_name, asyncio.Semaphore(self._team_limit)
             )
-        try:
-            async with self._global_capacity:
-                if team_capacity is None:
-                    await self._execute_attempts(bg, fork_conversation)
-                else:
-                    async with team_capacity:
+        with bg.agent.tracing.span(
+            "task.run",
+            {
+                "task.id": task_id,
+                "task.name": bg.name,
+                "session.id": bg.agent.session_id,
+                "agent.id": bg.agent.agent_id,
+                "team.name": team_name,
+            },
+        ) as span:
+            try:
+                async with self._global_capacity:
+                    if team_capacity is None:
                         await self._execute_attempts(bg, fork_conversation)
-        except asyncio.CancelledError:
-            self._cancel_persisted(bg)
-        finally:
-            bg.end_time = time.monotonic()
-            bg.progress.input_tokens = bg.agent.total_input_tokens
-            bg.progress.output_tokens = bg.agent.total_output_tokens
-            self._async_tasks.pop(task_id, None)
-            await self._notify_queue.put(task_id)
+                    else:
+                        async with team_capacity:
+                            await self._execute_attempts(bg, fork_conversation)
+            except asyncio.CancelledError:
+                self._cancel_persisted(bg)
+            finally:
+                bg.end_time = time.monotonic()
+                bg.progress.input_tokens = bg.agent.total_input_tokens
+                bg.progress.output_tokens = bg.agent.total_output_tokens
+                self._async_tasks.pop(task_id, None)
+                await self._notify_queue.put(task_id)
+                span.set_attributes(
+                    {
+                        "task.status": bg.status,
+                        "usage.input_tokens": bg.progress.input_tokens,
+                        "usage.output_tokens": bg.progress.output_tokens,
+                    }
+                )
 
     async def _execute_attempts(
         self, bg: BackgroundTask, fork_conversation: Any = None
@@ -149,11 +180,28 @@ class DurableTaskManager(TaskManager):
         while await self._claim_when_ready(bg):
             heartbeat = asyncio.create_task(self._heartbeat_loop(bg.id))
             try:
-                if fork_conversation is not None:
-                    result = await bg.agent.run_to_completion("", fork_conversation)
-                    fork_conversation = None
-                else:
-                    result = await bg.agent.run_to_completion(bg.task)
+                state = self.task_store.get(bg.id)
+                with bg.agent.tracing.span(
+                    "task.attempt",
+                    {
+                        "task.id": bg.id,
+                        "task.attempt": state.attempt_count if state else 0,
+                        "task.max_attempts": state.max_attempts if state else 0,
+                    },
+                ) as attempt_span:
+                    try:
+                        if fork_conversation is not None:
+                            result = await bg.agent.run_to_completion(
+                                "", fork_conversation
+                            )
+                            fork_conversation = None
+                        else:
+                            result = await bg.agent.run_to_completion(bg.task)
+                    except BaseException as exc:
+                        attempt_span.record_exception(exc)
+                        attempt_span.set_attributes({"task.attempt.status": "failed"})
+                        raise
+                    attempt_span.set_attributes({"task.attempt.status": "succeeded"})
                 bg.result = result
                 bg.status = "completed"
                 self._succeed(bg)

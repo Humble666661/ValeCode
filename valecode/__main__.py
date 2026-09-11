@@ -58,6 +58,10 @@ def main() -> None:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    from valecode.observability import configure_tracing_from_env
+
+    configure_tracing_from_env(Path.cwd())
+
     mode_str = args.mode if args.mode else config.permission_mode
     permission_mode = PermissionMode(mode_str)
 

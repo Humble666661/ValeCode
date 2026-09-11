@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from valecode.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from valecode.observability import get_tracing
 from valecode.persistence import Database, RunStore, SessionStore, TaskStore
 
 SESSIONS_DIR = ".valecode/sessions"
@@ -528,6 +529,21 @@ class SessionManager:
         return metas
 
     def resume(self, session_id: str) -> ResumeResult | None:
+        with get_tracing().span(
+            "session.resume", {"session.id": session_id}
+        ) as span:
+            result = self._resume(session_id)
+            span.set_attributes(
+                {
+                    "session.resume.found": result is not None,
+                    "session.resume.message_count": (
+                        len(result.messages) if result is not None else 0
+                    ),
+                }
+            )
+            return result
+
+    def _resume(self, session_id: str) -> ResumeResult | None:
         jsonl_path = self._sessions_dir / f"{session_id}.jsonl"
         meta_path = self._sessions_dir / f"{session_id}.meta"
 

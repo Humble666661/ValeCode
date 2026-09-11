@@ -106,6 +106,7 @@ class AgentTool(Tool):
         sub_agent.run_store = self._parent_agent.run_store
         sub_agent.provider_name = self._parent_agent.provider_name
         sub_agent.model = self._parent_agent.model
+        sub_agent.tracing = self._parent_agent.tracing
 
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]

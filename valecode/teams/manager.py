@@ -16,7 +16,7 @@ from valecode.teams.models import (
 )
 from valecode.teams.progress import TeammateProgress
 from valecode.teams.registry import AgentNameRegistry
-from valecode.teams.shared_task import SharedTaskStore
+from valecode.teams.shared_task import DurableSharedTaskStore, SharedTaskStore
 from valecode.teams.spawn_inprocess import InProcessTeammateHandle
 
 if TYPE_CHECKING:
@@ -30,7 +30,12 @@ class TeamError(Exception):
 
 
 class TeamManager:
-    def __init__(self, worktree_manager: Any = None, trace_manager: Any = None) -> None:
+    def __init__(
+        self,
+        worktree_manager: Any = None,
+        trace_manager: Any = None,
+        task_store: Any = None,
+    ) -> None:
         self._teams: dict[str, AgentTeam] = {}
         self._task_stores: dict[str, SharedTaskStore] = {}
         self._mailboxes: dict[str, Mailbox] = {}
@@ -40,6 +45,7 @@ class TeamManager:
         self._worktree_manager = worktree_manager
         self._trace_manager = trace_manager
         self._teammate_team_map: dict[str, str] = {}  # agent_id -> team_name
+        self._durable_task_store = task_store
 
     def detect_backend(
         self,
@@ -73,7 +79,11 @@ class TeamManager:
         )
         team.save()
 
-        task_store = SharedTaskStore(team_dir / "tasks.json")
+        task_store = (
+            DurableSharedTaskStore(self._durable_task_store, slug)
+            if self._durable_task_store is not None
+            else SharedTaskStore(team_dir / "tasks.json")
+        )
         task_store.init_empty()
 
         mailbox_dir = team_dir / "mailbox"
@@ -104,6 +114,10 @@ class TeamManager:
             return self._task_stores[team_name]
         team_dir = resolve_team_dir(team_name)
         tasks_path = team_dir / "tasks.json"
+        if self._durable_task_store is not None and (team_dir / "config.json").exists():
+            store = DurableSharedTaskStore(self._durable_task_store, team_name)
+            self._task_stores[team_name] = store
+            return store
         if tasks_path.exists():
             store = SharedTaskStore(tasks_path)
             self._task_stores[team_name] = store

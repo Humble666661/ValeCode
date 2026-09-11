@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from valecode.persistence import TaskState, TaskStore
+
 
 @dataclass
 class SharedTask:
@@ -129,3 +131,158 @@ class SharedTaskStore:
         self._tasks.clear()
         self._next_id = 1
         self._save()
+
+
+class DurableSharedTaskStore:
+    """Team task-board adapter backed by the control-plane TaskStore."""
+
+    def __init__(self, task_store: TaskStore, team_name: str) -> None:
+        self._store = task_store
+        self._team_name = team_name
+
+    def _database_id(self, display_id: str) -> str:
+        return f"shared:{self._team_name}:{display_id}"
+
+    @staticmethod
+    def _to_shared(state: TaskState) -> SharedTask:
+        data = state.input
+        return SharedTask(
+            id=str(state.metadata.get("shared_id", state.id)),
+            title=str(data.get("title", "")),
+            description=str(data.get("description", "")),
+            status=str(data.get("board_status", "pending")),
+            assignee=str(data.get("assignee", "")),
+            blocks=list(data.get("blocks", [])),
+            blocked_by=list(data.get("blocked_by", [])),
+            created_by=str(data.get("created_by", "")),
+        )
+
+    def _states(self) -> list[TaskState]:
+        return [
+            state
+            for state in self._store.list(team_name=self._team_name, limit=10_000)
+            if state.metadata.get("kind") == "shared_team_task"
+        ]
+
+    def create(
+        self,
+        title: str,
+        description: str = "",
+        assignee: str = "",
+        blocks: list[str] | None = None,
+        blocked_by: list[str] | None = None,
+        created_by: str = "",
+    ) -> SharedTask:
+        existing_ids = [int(s.metadata["shared_id"]) for s in self._states()]
+        display_id = str(max(existing_ids, default=0) + 1)
+        dependencies = [
+            self._database_id(item)
+            for item in blocked_by or []
+            if self._store.get(self._database_id(item)) is not None
+        ]
+        state = self._store.create(
+            {
+                "title": title,
+                "description": description,
+                "assignee": assignee,
+                "blocks": blocks or [],
+                "blocked_by": blocked_by or [],
+                "created_by": created_by,
+                "board_status": "pending",
+            },
+            task_id=self._database_id(display_id),
+            team_name=self._team_name,
+            dependencies=dependencies,
+            metadata={"kind": "shared_team_task", "shared_id": display_id},
+        )
+        # ``blocks`` is the inverse relationship: add this task as a dependency
+        # of every already-existing target.
+        for blocked_id in blocks or []:
+            target = self._store.get(self._database_id(blocked_id))
+            if target is not None:
+                target_input = dict(target.input)
+                target_blocked_by = list(target_input.get("blocked_by", []))
+                if display_id not in target_blocked_by:
+                    target_blocked_by.append(display_id)
+                    target_input["blocked_by"] = target_blocked_by
+                self._store.update_details(
+                    target.id,
+                    input=target_input,
+                    add_dependencies=[state.id],
+                )
+        return self._to_shared(state)
+
+    def get(self, task_id: str) -> SharedTask | None:
+        state = self._store.get(self._database_id(task_id))
+        if state is None or state.metadata.get("kind") != "shared_team_task":
+            return None
+        return self._to_shared(state)
+
+    def list_tasks(
+        self, status: str | None = None, assignee: str | None = None
+    ) -> list[SharedTask]:
+        tasks = [self._to_shared(state) for state in self._states()]
+        if status:
+            tasks = [task for task in tasks if task.status == status]
+        if assignee:
+            tasks = [task for task in tasks if task.assignee == assignee]
+        return tasks
+
+    def update(
+        self,
+        task_id: str,
+        status: str | None = None,
+        assignee: str | None = None,
+        description: str | None = None,
+        add_blocks: list[str] | None = None,
+        add_blocked_by: list[str] | None = None,
+    ) -> SharedTask | None:
+        database_id = self._database_id(task_id)
+        state = self._store.get(database_id)
+        if state is None or state.metadata.get("kind") != "shared_team_task":
+            return None
+        data = dict(state.input)
+        if status is not None:
+            data["board_status"] = status
+        if assignee is not None:
+            data["assignee"] = assignee
+        if description is not None:
+            data["description"] = description
+        for field_name, additions in (
+            ("blocks", add_blocks),
+            ("blocked_by", add_blocked_by),
+        ):
+            values = list(data.get(field_name, []))
+            for value in additions or []:
+                if value not in values:
+                    values.append(value)
+            data[field_name] = values
+        dependencies = [
+            self._database_id(item)
+            for item in add_blocked_by or []
+            if self._store.get(self._database_id(item)) is not None
+        ]
+        updated = self._store.update_details(
+            database_id, input=data, add_dependencies=dependencies
+        )
+        if status is not None:
+            updated = self._store.update_board_status(database_id, status)
+        for blocked_id in add_blocks or []:
+            target = self._store.get(self._database_id(blocked_id))
+            if target is None:
+                continue
+            target_input = dict(target.input)
+            target_blocked_by = list(target_input.get("blocked_by", []))
+            if task_id not in target_blocked_by:
+                target_blocked_by.append(task_id)
+                target_input["blocked_by"] = target_blocked_by
+            self._store.update_details(
+                target.id,
+                input=target_input,
+                add_dependencies=[database_id],
+            )
+        return self._to_shared(updated)
+
+    def init_empty(self) -> None:
+        # Team names are unique, so a newly created team has no matching rows.
+        return

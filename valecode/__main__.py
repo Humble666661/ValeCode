@@ -124,6 +124,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     from valecode.client import create_client, resolve_context_window
     from valecode.conversation import ConversationManager
     from valecode.memory.instructions import load_instructions
+    from valecode.memory.session import SessionManager
     from valecode.permissions import (
         DangerousCommandDetector,
         PathSandbox,
@@ -132,7 +133,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     )
     from valecode.tools import create_default_registry
     from valecode.agents.loader import AgentLoader
-    from valecode.agents.task_manager import TaskManager
+    from valecode.agents.durable_task_manager import DurableTaskManager
     from valecode.agents.trace import TraceManager
     from valecode.tools.agent_tool import AgentTool
     from valecode.tools.impl.tool_search import ToolSearchTool
@@ -169,6 +170,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     )
 
     instructions = load_instructions(work_dir)
+    session_manager = SessionManager(work_dir)
+    session = session_manager.create()
     registry = create_default_registry()
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
@@ -181,7 +184,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         context_window=provider.get_context_window(),
         instructions_content=instructions,
         hook_engine=hook_engine,
+        run_store=session_manager.run_store,
+        provider_name=provider.name,
+        model=provider.model,
     )
+    agent.session_id = session.session_id
 
     wt_cfg = config.worktree or WorktreeConfig()
     wt_manager = WorktreeManager(
@@ -189,10 +196,14 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         symlink_directories=wt_cfg.symlink_directories,
     )
     trace_manager = TraceManager()
-    task_manager = TaskManager()
+    task_manager = DurableTaskManager(session_manager.task_store)
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
     agent_loader.load_all()
-    team_manager = TeamManager(worktree_manager=wt_manager, trace_manager=trace_manager)
+    team_manager = TeamManager(
+        worktree_manager=wt_manager,
+        trace_manager=trace_manager,
+        task_store=session_manager.task_store,
+    )
 
     agent_tool = AgentTool(
         agent_loader=agent_loader,
@@ -233,6 +244,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     # 使用事件驱动的 agent.run()，支持 text 和 stream-json 两种输出格式
     conv = ConversationManager()
     conv.add_user_message(prompt)
+    session.append(conv.history[-1])
 
     start = time.monotonic()
     text_buf = ""
@@ -356,4 +368,3 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
 
 if __name__ == "__main__":
     main()
-

@@ -725,6 +725,9 @@ class VelaCodeApp(App):
         self._instructions_content = load_instructions(work_dir)
         self.memory_manager = MemoryManager(work_dir)
         self.session_manager = SessionManager(work_dir)
+        from valecode.agents.durable_task_manager import DurableTaskManager
+
+        self.task_manager = DurableTaskManager(self.session_manager.task_store)
         self.session_manager.cleanup()
         self.session = self.session_manager.create()
 
@@ -761,6 +764,9 @@ class VelaCodeApp(App):
             instructions_content=self._instructions_content,
             memory_manager=self.memory_manager,
             hook_engine=self.hook_engine,
+            run_store=self.session_manager.run_store,
+            provider_name=provider.name,
+            model=provider.model,
         )
         self.agent.file_history = self.file_history
         self.agent.session_id = self.session.session_id
@@ -853,7 +859,11 @@ class VelaCodeApp(App):
         from valecode.tools.team_create import TeamCreateTool
         from valecode.tools.team_delete import TeamDeleteTool
 
-        self.team_manager = TeamManager(worktree_manager=self.worktree_manager, trace_manager=self.trace_manager)
+        self.team_manager = TeamManager(
+            worktree_manager=self.worktree_manager,
+            trace_manager=self.trace_manager,
+            task_store=self.session_manager.task_store,
+        )
 
         agent_tool = AgentTool(
             agent_loader=self.agent_loader,

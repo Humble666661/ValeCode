@@ -99,6 +99,61 @@ class NetworkError(LLMError):
     pass
 
 
+class ServerError(LLMError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+class OverloadedError(ServerError):
+    pass
+
+
+class InvalidRequestError(LLMError):
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _retry_after(error: Any) -> float | None:
+    from valecode.runtime.retry import parse_retry_after
+
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    return parse_retry_after(headers.get("retry-after"))
+
+
+def _status_error(error: Any) -> LLMError:
+    status = int(getattr(error, "status_code", 0) or 0)
+    message = str(getattr(error, "message", error))
+    retry_after = _retry_after(error)
+    lowered = message.lower()
+    if status == 529 or "overload" in lowered:
+        return OverloadedError(
+            f"Provider overloaded ({status}): {message}",
+            status_code=status or 529,
+            retry_after=retry_after,
+        )
+    if status in {408, 409} or status >= 500:
+        return ServerError(
+            f"Provider server error ({status}): {message}",
+            status_code=status,
+            retry_after=retry_after,
+        )
+    return InvalidRequestError(
+        f"API request error ({status}): {message}", status_code=status or None
+    )
+
+
 class LLMClient(ABC):
     @abstractmethod
     async def stream(
@@ -133,7 +188,11 @@ class AnthropicClient(LLMClient):
                 "Anthropic API key not found. "
                 "Set it in .env, .valecode/config.yaml, or via ANTHROPIC_API_KEY."
             )
-        self._client = AsyncAnthropic(api_key=api_key, base_url=config.base_url)
+        # Retries are centralized in Agent/RetryPolicy so every protocol emits
+        # the same RetryEvent, RunEvent, and trace spans.
+        self._client = AsyncAnthropic(
+            api_key=api_key, base_url=config.base_url, max_retries=0
+        )
 
     def set_max_output_tokens(self, tokens: int) -> None:
         self.max_output_tokens = tokens
@@ -307,15 +366,14 @@ class AnthropicClient(LLMClient):
         except _anthropic.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
         except _anthropic.RateLimitError as e:
-            retry = e.response.headers.get("retry-after") if e.response else None
             raise RateLimitError(
-                f"Rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
-                retry_after=float(retry) if retry else None,
+                "Rate limited by provider.",
+                retry_after=_retry_after(e),
             ) from e
         except _anthropic.APIConnectionError as e:
             raise NetworkError(f"Network error: {e}") from e
         except _anthropic.APIStatusError as e:
-            raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+            raise _status_error(e) from e
 
 
 class OpenAIClient(LLMClient):
@@ -328,7 +386,9 @@ class OpenAIClient(LLMClient):
                 "OpenAI API key not found. "
                 "Set it in .env, .valecode/config.yaml, or via OPENAI_API_KEY."
             )
-        self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url)
+        self._client = AsyncOpenAI(
+            api_key=api_key, base_url=config.base_url, max_retries=0
+        )
 
     def set_max_output_tokens(self, tokens: int) -> None:
         self.max_output_tokens = tokens
@@ -430,17 +490,14 @@ class OpenAIClient(LLMClient):
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
         except _openai.RateLimitError as e:
-            retry = None
-            if hasattr(e, "response") and e.response is not None:
-                retry = e.response.headers.get("retry-after")
             raise RateLimitError(
-                f"Rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
-                retry_after=float(retry) if retry else None,
+                "Rate limited by provider.",
+                retry_after=_retry_after(e),
             ) from e
         except _openai.APIConnectionError as e:
             raise NetworkError(f"Network error: {e}") from e
         except _openai.APIStatusError as e:
-            raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+            raise _status_error(e) from e
 
 
 class OpenAICompatClient(LLMClient):
@@ -461,7 +518,9 @@ class OpenAICompatClient(LLMClient):
                 "OpenAI-compatible API key not found. "
                 "Set it in .env, .valecode/config.yaml, or via OPENAI_API_KEY."
             )
-        self._client = AsyncOpenAI(api_key=api_key, base_url=config.base_url)
+        self._client = AsyncOpenAI(
+            api_key=api_key, base_url=config.base_url, max_retries=0
+        )
 
     def set_max_output_tokens(self, tokens: int) -> None:
         self.max_output_tokens = tokens
@@ -601,17 +660,14 @@ class OpenAICompatClient(LLMClient):
         except _openai.AuthenticationError as e:
             raise AuthenticationError(f"Invalid API key: {e}") from e
         except _openai.RateLimitError as e:
-            retry = None
-            if hasattr(e, "response") and e.response is not None:
-                retry = e.response.headers.get("retry-after")
             raise RateLimitError(
-                f"Rate limited. {f'Retry after {retry}s.' if retry else 'Please wait.'}",
-                retry_after=float(retry) if retry else None,
+                "Rate limited by provider.",
+                retry_after=_retry_after(e),
             ) from e
         except _openai.APIConnectionError as e:
             raise NetworkError(f"Network error: {e}") from e
         except _openai.APIStatusError as e:
-            raise LLMError(f"API error ({e.status_code}): {e.message}") from e
+            raise _status_error(e) from e
 
 
 def create_client(config: ProviderConfig) -> LLMClient:

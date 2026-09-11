@@ -1,5 +1,24 @@
 """Execution reliability helpers for retry, recovery, and idempotency."""
 
+from valecode.runtime.loop_guard import LoopDecision, LoopGuard
+from valecode.runtime.retry import (
+    ErrorCategory,
+    RetryDecision,
+    RetryPolicy,
+    classify_provider_error,
+    parse_retry_after,
+)
+
+__all__ = [
+    "ErrorCategory",
+    "LoopDecision",
+    "LoopGuard",
+    "RetryDecision",
+    "RetryPolicy",
+    "classify_provider_error",
+    "parse_retry_after",
+]
+
 from valecode.runtime.idempotency import (
     FileEffectState,
     canonical_arguments,

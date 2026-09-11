@@ -43,6 +43,7 @@ from valecode.persistence import (
     ToolCallStatus,
 )
 from valecode.runtime.idempotency import make_tool_idempotency_key
+from valecode.runtime import LoopGuard, RetryPolicy
 from valecode.observability import Tracing, get_tracing
 from valecode.hooks import HookContext, HookEngine, ToolRejectedError
 from valecode.hooks.engine import HookNotification
@@ -322,6 +323,8 @@ class Agent:
         provider_name: str | None = None,
         model: str | None = None,
         tracing: Tracing | None = None,
+        retry_policy: RetryPolicy | None = None,
+        loop_guard: LoopGuard | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -349,6 +352,8 @@ class Agent:
         self.provider_name = provider_name
         self.model = model
         self.tracing = tracing or get_tracing()
+        self.retry_policy = retry_policy or RetryPolicy.from_environment(work_dir)
+        self.loop_guard = loop_guard or LoopGuard.from_environment(work_dir)
         self._current_run_id: str | None = None
         self._current_trace_id: str | None = None
         self._resume_run_id: str | None = None
@@ -484,6 +489,7 @@ class Agent:
         self._current_trace_id = None
         self._current_step_id = None
         self._control_tool_ids = {}
+        self.loop_guard.reset()
         if self.run_store is None or not self.session_id:
             # Standalone/test agents still need a stable request trace so any
             # Sub-Agent launched during this run can join the same trace.
@@ -741,47 +747,168 @@ class Agent:
             "agent.parent_id": self.parent_id or "",
         }
 
-    async def _consume_llm_stream(
-        self, collector: StreamCollector, llm_stream: AsyncIterator[StreamEvent]
-    ) -> AsyncIterator[AgentEvent]:
-        started = time.monotonic()
-        first_event_at: float | None = None
-        trace_context = self.tracing.span(
-            "llm.stream",
-            {
-                **self._trace_attributes(),
-                "provider.name": self.provider_name or "",
-                "model.name": self.model or "",
-            },
-        )
-        span = trace_context.__enter__()
-        try:
-            async for event in collector.consume(llm_stream):
-                if first_event_at is None:
-                    first_event_at = time.monotonic()
-                yield event
-        except BaseException:
-            trace_context.__exit__(*sys.exc_info())
-            raise
-        else:
-            response = collector.response
-            finished = time.monotonic()
-            span.set_attributes(
-                {
-                    "llm.duration_ms": round((finished - started) * 1000, 3),
-                    "llm.ttft_ms": (
-                        round((first_event_at - started) * 1000, 3)
-                        if first_event_at is not None
-                        else -1
-                    ),
-                    "llm.input_tokens": response.input_tokens,
-                    "llm.output_tokens": response.output_tokens,
-                    "llm.cache_read_tokens": response.cache_read,
-                    "llm.cache_creation_tokens": response.cache_creation,
-                    "llm.stop_reason": response.stop_reason or "",
-                }
+    def _record_runtime_event(
+        self, event_type: str, payload: dict[str, Any]
+    ) -> None:
+        if self.run_store is None:
+            return
+        self._control_call(
+            lambda: self.run_store.events.append(
+                event_type,
+                session_id=self.session_id or None,
+                run_id=self._current_run_id,
+                step_id=self._current_step_id,
+                payload=payload,
             )
-            trace_context.__exit__(None, None, None)
+        )
+
+    async def _consume_llm_stream(
+        self,
+        collector: StreamCollector,
+        conversation: ConversationManager,
+        system: str,
+        tools: list[dict[str, Any]],
+    ) -> AsyncIterator[AgentEvent]:
+        overall_started = time.monotonic()
+        retries_used = 0
+        total_wait = 0.0
+        while True:
+            attempt_started = time.monotonic()
+            first_event_at: float | None = None
+            trace_context = self.tracing.span(
+                "llm.stream",
+                {
+                    **self._trace_attributes(),
+                    "provider.name": self.provider_name or "",
+                    "model.name": self.model or "",
+                    "retry.count": retries_used,
+                },
+            )
+            span = trace_context.__enter__()
+            try:
+                llm_stream = self.client.stream(
+                    conversation, system=system, tools=tools
+                )
+                async for event in collector.consume(llm_stream):
+                    if first_event_at is None:
+                        first_event_at = time.monotonic()
+                    yield event
+            except asyncio.CancelledError:
+                trace_context.__exit__(*sys.exc_info())
+                raise
+            except BaseException as exc:
+                decision = self.retry_policy.decide(
+                    exc, retries_used=retries_used, total_wait=total_wait
+                )
+                payload = {
+                    "attempt": decision.attempt,
+                    "category": decision.category.value,
+                    "retry": decision.retry,
+                    "delay": decision.delay,
+                    "reason": decision.reason,
+                    "error_type": type(exc).__name__,
+                }
+                span.set_attributes(
+                    {
+                        "error.type": type(exc).__name__,
+                        "retry.category": decision.category.value,
+                        "retry.scheduled": decision.retry,
+                        "retry.delay": decision.delay,
+                        "retry.reason": decision.reason,
+                    }
+                )
+                trace_context.__exit__(*sys.exc_info())
+                if not decision.retry:
+                    self._record_runtime_event("llm.retry_exhausted", payload)
+                    raise
+                self._record_runtime_event("llm.retry_scheduled", payload)
+                retries_used += 1
+                total_wait += decision.delay
+                # Discard partial response state; the provider request is replayed
+                # from the unchanged conversation on the next attempt.
+                collector.response = LLMResponse()
+                yield RetryEvent(
+                    reason=(
+                        f"{decision.category.value} "
+                        f"({decision.attempt}/{self.retry_policy.max_retries})"
+                    ),
+                    wait=decision.delay,
+                )
+                with self.tracing.span(
+                    "llm.retry",
+                    {
+                        **self._trace_attributes(),
+                        **payload,
+                        "retry.total_wait": total_wait,
+                    },
+                ):
+                    await asyncio.sleep(decision.delay)
+                continue
+            else:
+                response = collector.response
+                finished = time.monotonic()
+                span.set_attributes(
+                    {
+                        "llm.duration_ms": round(
+                            (finished - attempt_started) * 1000, 3
+                        ),
+                        "llm.total_duration_ms": round(
+                            (finished - overall_started) * 1000, 3
+                        ),
+                        "llm.ttft_ms": (
+                            round((first_event_at - attempt_started) * 1000, 3)
+                            if first_event_at is not None
+                            else -1
+                        ),
+                        "llm.input_tokens": response.input_tokens,
+                        "llm.output_tokens": response.output_tokens,
+                        "llm.cache_read_tokens": response.cache_read,
+                        "llm.cache_creation_tokens": response.cache_creation,
+                        "llm.stop_reason": response.stop_reason or "",
+                        "retry.count": retries_used,
+                    }
+                )
+                trace_context.__exit__(None, None, None)
+                return
+
+    def _check_tool_loop(self, calls: list[ToolCallComplete]):
+        for call in calls:
+            # Preserve the existing unknown-tool circuit breaker and its more
+            # specific diagnostic instead of shadowing it with repetition.
+            if self.registry.get(call.tool_name) is None:
+                self.loop_guard.reset()
+                continue
+            with self.tracing.span(
+                "loop_guard.evaluate",
+                {
+                    **self._trace_attributes(),
+                    "tool.name": call.tool_name,
+                    "tool.call_id": call.tool_id,
+                    "tool.arguments": call.arguments,
+                },
+            ) as span:
+                decision = self.loop_guard.observe(call)
+                span.set_attributes(
+                    {
+                        "loop.repeat_count": decision.repeat_count,
+                        "loop.repeat_limit": self.loop_guard.repeat_limit,
+                        "loop.blocked": decision.blocked,
+                        "loop.signature": decision.signature,
+                    }
+                )
+            if decision.blocked:
+                self._record_runtime_event(
+                    "loop_guard.triggered",
+                    {
+                        "tool_name": decision.tool_name,
+                        "signature": decision.signature,
+                        "repeat_count": decision.repeat_count,
+                        "limit": self.loop_guard.repeat_limit,
+                        "reason": decision.reason,
+                    },
+                )
+                return decision
+        return None
 
     async def _auto_compact_with_trace(
         self,
@@ -995,8 +1122,9 @@ class Agent:
 
             self._start_control_step(iteration)
             collector = StreamCollector()
-            llm_stream = self.client.stream(conversation, system=system, tools=tools)
-            async for event in self._consume_llm_stream(collector, llm_stream):
+            async for event in self._consume_llm_stream(
+                collector, conversation, system, tools
+            ):
                 yield event
 
             response = collector.response
@@ -1080,6 +1208,17 @@ class Agent:
                     event_payload={"stop_reason": response.stop_reason},
                 )
                 yield LoopComplete(total_turns=iteration)
+                break
+
+            loop_decision = self._check_tool_loop(response.tool_calls)
+            if loop_decision is not None:
+                self._finish_control_step(
+                    StepStatus.FAILED,
+                    response=response,
+                    error=loop_decision.reason,
+                    event_payload={"loop_guard": True},
+                )
+                yield ErrorEvent(message=f"Agent loop stopped: {loop_decision.reason}")
                 break
 
             tool_uses = [
@@ -1793,8 +1932,9 @@ class Agent:
 
             self._start_control_step(iteration)
             collector = StreamCollector()
-            llm_stream = self.client.stream(conversation, system=system, tools=tools)
-            async for _event in self._consume_llm_stream(collector, llm_stream):
+            async for _event in self._consume_llm_stream(
+                collector, conversation, system, tools
+            ):
                 pass
 
             response = collector.response
@@ -1835,6 +1975,16 @@ class Agent:
                     event_payload={"stop_reason": response.stop_reason},
                 )
                 completed = True
+                break
+
+            loop_decision = self._check_tool_loop(response.tool_calls)
+            if loop_decision is not None:
+                self._finish_control_step(
+                    StepStatus.FAILED,
+                    response=response,
+                    error=loop_decision.reason,
+                    event_payload={"loop_guard": True},
+                )
                 break
 
             tool_uses = [

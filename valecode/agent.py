@@ -35,6 +35,13 @@ from valecode.permissions import (
     PermissionChecker,
     PermissionMode,
 )
+from valecode.persistence import (
+    RunStatus,
+    RunStore,
+    StepStatus,
+    ToolCallStatus,
+)
+from valecode.runtime.idempotency import make_tool_idempotency_key
 from valecode.hooks import HookContext, HookEngine, ToolRejectedError
 from valecode.hooks.engine import HookNotification
 from valecode.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
@@ -309,6 +316,9 @@ class Agent:
         instructions_content: str = "",
         memory_manager: MemoryManager | None = None,
         hook_engine: HookEngine | None = None,
+        run_store: RunStore | None = None,
+        provider_name: str | None = None,
+        model: str | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -332,6 +342,14 @@ class Agent:
         self.instructions_content = instructions_content
         self.memory_manager = memory_manager
         self.hook_engine = hook_engine
+        self.run_store = run_store
+        self.provider_name = provider_name
+        self.model = model
+        self._current_run_id: str | None = None
+        self._current_trace_id: str | None = None
+        self._resume_run_id: str | None = None
+        self._current_step_id: str | None = None
+        self._control_tool_ids: dict[str, str] = {}
         self._loop_count = 0
         # 记忆提取合并策略（对齐 Go 版 inProgress + pendingContext）：
         # _extracting: 标记是否有提取正在进行
@@ -345,6 +363,9 @@ class Agent:
         self._agent_catalog_list: list[tuple[str, str]] = []
         self.agent_id: str = uuid.uuid4().hex[:12]
         self.parent_id: str | None = None
+        # ``parent_id`` is the tracing agent id. This separate field is a
+        # database run id and is therefore safe to use as a foreign key.
+        self.parent_run_id: str | None = None
         self.trace_id: str | None = None
         self.coordinator_mode: bool = False
         self.team_name: str = ""
@@ -432,7 +453,307 @@ class Agent:
             for n in self.hook_engine.drain_notifications()
         ]
 
+    def _control_call(self, operation: Callable[[], Any]) -> Any:
+        """Best-effort control-plane write; never break the agent data path."""
+        if self.run_store is None:
+            return None
+        try:
+            return operation()
+        except Exception:
+            log.exception("Control-plane persistence failed")
+            return None
+
+    def _latest_user_input(self, conversation: ConversationManager) -> str:
+        for message in reversed(conversation.history):
+            if (
+                message.role == "user"
+                and message.content
+                and not message.content.startswith("<system-reminder>")
+            ):
+                return message.content
+        return ""
+
+    def _start_control_run(
+        self, conversation: ConversationManager, *, input_text: str | None = None
+    ) -> None:
+        self._current_run_id = None
+        self._current_trace_id = None
+        self._current_step_id = None
+        self._control_tool_ids = {}
+        if self.run_store is None or not self.session_id:
+            return
+        if self._resume_run_id is not None:
+            resume_run_id = self._resume_run_id
+            self._resume_run_id = None
+            run = self._control_call(lambda: self.run_store.get_run(resume_run_id))
+            if run is None or run.session_id != self.session_id:
+                log.error("Cannot resume run %s for session %s", resume_run_id, self.session_id)
+                return
+            if run.status == RunStatus.INTERRUPTED:
+                run = self._control_call(
+                    lambda: self.run_store.transition_run(
+                        resume_run_id,
+                        RunStatus.RUNNING,
+                        event_payload={"recovery": True},
+                    )
+                )
+            if run is not None and run.status == RunStatus.RUNNING:
+                self._current_run_id = run.id
+                self._current_trace_id = run.trace_id
+            return
+        trace_id = self.trace_id or uuid.uuid4().hex
+        run = self._control_call(
+            lambda: self.run_store.create_run(
+                self.session_id,
+                input=input_text if input_text is not None else self._latest_user_input(conversation),
+                agent_id=self.agent_id,
+                parent_run_id=self.parent_run_id,
+                trace_id=trace_id,
+                metadata={"protocol": self.protocol},
+            )
+        )
+        if run is None:
+            return
+        self._current_run_id = run.id
+        self._current_trace_id = run.trace_id
+        self._control_call(
+            lambda: self.run_store.transition_run(run.id, RunStatus.RUNNING)
+        )
+
+    def _start_control_step(self, iteration: int) -> None:
+        if self.run_store is None or self._current_run_id is None:
+            return
+        step = self._control_call(
+            lambda: self.run_store.create_step(
+                self._current_run_id,
+                provider=self.provider_name,
+                model=self.model,
+                metadata={"iteration": iteration},
+            )
+        )
+        if step is None:
+            return
+        self._current_step_id = step.id
+        self._control_call(
+            lambda: self.run_store.transition_step(step.id, StepStatus.RUNNING)
+        )
+
+    def _finish_control_step(
+        self,
+        status: StepStatus,
+        *,
+        response: LLMResponse | None = None,
+        error: str | None = None,
+        event_payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self.run_store is None or self._current_step_id is None:
+            return
+        step_id = self._current_step_id
+        self._control_call(
+            lambda: self.run_store.transition_step(
+                step_id,
+                status,
+                input_tokens=response.input_tokens if response else None,
+                output_tokens=response.output_tokens if response else None,
+                error=error,
+                event_payload=event_payload,
+            )
+        )
+        if status not in {StepStatus.RUNNING, StepStatus.BLOCKED}:
+            self._current_step_id = None
+
+    def _finish_control_run(
+        self, status: RunStatus, *, error: str | None = None
+    ) -> None:
+        if self.run_store is None or self._current_run_id is None:
+            return
+        run_id = self._current_run_id
+        self._control_call(
+            lambda: self.run_store.transition_run(run_id, status, error=error)
+        )
+        if status not in {RunStatus.RUNNING, RunStatus.BLOCKED}:
+            self._current_run_id = None
+            self._current_trace_id = None
+
+    def _cancel_control_tools(self) -> None:
+        if self.run_store is None or self._current_run_id is None:
+            return
+        for tool_call in self._control_call(
+            lambda: self.run_store.list_tool_calls(self._current_run_id)
+        ) or []:
+            if tool_call.status in {ToolCallStatus.PENDING, ToolCallStatus.RUNNING}:
+                self._control_call(
+                    lambda tool_call=tool_call: self.run_store.transition_tool_call(
+                        tool_call.id,
+                        ToolCallStatus.CANCELLED,
+                        error="Agent run cancelled",
+                    )
+                )
+
+    def _register_control_tool_calls(
+        self, calls: list[ToolCallComplete]
+    ) -> None:
+        if (
+            self.run_store is None
+            or self._current_run_id is None
+            or self._current_step_id is None
+        ):
+            return
+        for tc in calls:
+            tool = self.registry.get(tc.tool_name)
+            category = getattr(tool, "category", "unknown") if tool else "unknown"
+            side_effect_class = {
+                "read": "read",
+                "write": "write",
+                "command": "external",
+            }.get(category, "unknown")
+            stored_id = f"{self._current_run_id}:{tc.tool_id}"
+            created = self._control_call(
+                lambda tc=tc, stored_id=stored_id, side_effect_class=side_effect_class: (
+                    self.run_store.create_tool_call(
+                        self._current_run_id,
+                        self._current_step_id,
+                        tc.tool_name,
+                        tc.arguments,
+                        tool_call_id=stored_id,
+                        idempotency_key=make_tool_idempotency_key(
+                            self._current_run_id,
+                            tc.tool_id,
+                            tc.tool_name,
+                            tc.arguments,
+                        ),
+                        side_effect_class=side_effect_class,
+                        metadata={"provider_tool_call_id": tc.tool_id},
+                    )
+                )
+            )
+            if created is not None:
+                self._control_tool_ids[tc.tool_id] = created.id
+
+    def resume_run(self, run_id: str) -> None:
+        """Resume an interrupted run on the next ``run`` invocation."""
+        self._resume_run_id = run_id
+
+    def _control_existing_tool_result(
+        self, provider_tool_id: str
+    ) -> tuple[ToolResult, float, bool] | None:
+        if self.run_store is None:
+            return None
+        stored_id = self._control_tool_ids.get(provider_tool_id)
+        if stored_id is None:
+            return None
+        call = self._control_call(lambda: self.run_store.get_tool_call(stored_id))
+        if call is None:
+            return None
+        if call.status == ToolCallStatus.COMPLETED:
+            output = ""
+            if call.result_path:
+                try:
+                    output = Path(call.result_path).read_text(encoding="utf-8")
+                except OSError:
+                    pass
+            if not output and isinstance(call.result, dict):
+                output = str(call.result.get("output", ""))
+            return ToolResult(output=output, is_error=False), (call.elapsed_ms or 0) / 1000, False
+        if call.status == ToolCallStatus.UNCERTAIN and call.side_effect_class != "read":
+            return (
+                ToolResult(
+                    output=(
+                        "Recovery blocked: this tool may already have produced an external "
+                        "side effect. Confirm or compensate before retrying."
+                    ),
+                    is_error=True,
+                ),
+                (call.elapsed_ms or 0) / 1000,
+                False,
+            )
+        return None
+
+    def _transition_control_tool(
+        self,
+        provider_tool_id: str,
+        status: ToolCallStatus,
+        *,
+        result: ToolResult | None = None,
+        elapsed: float | None = None,
+        result_path: str | None = None,
+    ) -> None:
+        if self.run_store is None:
+            return
+        stored_id = self._control_tool_ids.get(provider_tool_id)
+        if stored_id is None:
+            return
+        existing = self._control_call(lambda: self.run_store.get_tool_call(stored_id))
+        if existing is not None and existing.status in {
+            ToolCallStatus.COMPLETED,
+            ToolCallStatus.FAILED,
+            ToolCallStatus.CANCELLED,
+            ToolCallStatus.DENIED,
+        }:
+            return
+        if existing is not None and existing.status == ToolCallStatus.UNCERTAIN and status != ToolCallStatus.RUNNING:
+            return
+        self._control_call(
+            lambda: self.run_store.transition_tool_call(
+                stored_id,
+                status,
+                result=(
+                    {"output": result.output, "is_error": result.is_error}
+                    if result is not None
+                    else None
+                ),
+                is_error=result.is_error if result is not None else None,
+                error=result.output if result is not None and result.is_error else None,
+                elapsed_ms=round(elapsed * 1000) if elapsed is not None else None,
+                result_path=result_path,
+            )
+        )
+
+    @staticmethod
+    def _tool_terminal_status(result: ToolResult) -> ToolCallStatus:
+        if not result.is_error:
+            return ToolCallStatus.COMPLETED
+        if result.output.startswith(("Permission denied:", "Hook rejected:")):
+            return ToolCallStatus.DENIED
+        return ToolCallStatus.FAILED
+
+    def _control_result_path(self, provider_tool_id: str, raw_output: str) -> str | None:
+        from valecode.context.manager import SINGLE_RESULT_CHAR_LIMIT
+
+        if len(raw_output) <= SINGLE_RESULT_CHAR_LIMIT:
+            return None
+        return str(self.session_dir / "tool-results" / f"{provider_tool_id}.txt")
+
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
+        self._start_control_run(conversation)
+        completed = False
+        try:
+            async for event in self._run_loop(conversation):
+                if isinstance(event, LoopComplete):
+                    completed = True
+                yield event
+        except asyncio.CancelledError:
+            self._cancel_control_tools()
+            self._finish_control_step(StepStatus.CANCELLED, error="Agent run cancelled")
+            self._finish_control_run(RunStatus.CANCELLED, error="Agent run cancelled")
+            raise
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self._finish_control_step(StepStatus.FAILED, error=message)
+            self._finish_control_run(RunStatus.FAILED, error=message)
+            raise
+        else:
+            if completed:
+                self._finish_control_run(RunStatus.COMPLETED)
+            else:
+                self._finish_control_step(
+                    StepStatus.INTERRUPTED, error="Agent loop ended without completion"
+                )
+                self._finish_control_run(
+                    RunStatus.INTERRUPTED, error="Agent loop ended without completion"
+                )
+
+    async def _run_loop(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._current_conversation = conversation
         env_context = build_environment_context(
             self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
@@ -553,6 +874,7 @@ class Agent:
             elif isinstance(compact_result, str):
                 yield ErrorEvent(message=compact_result)
 
+            self._start_control_step(iteration)
             collector = StreamCollector()
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
             async for event in collector.consume(llm_stream):
@@ -579,6 +901,11 @@ class Agent:
             ]
 
             if response.stop_reason == "max_tokens":
+                self._finish_control_step(
+                    StepStatus.COMPLETED,
+                    response=response,
+                    event_payload={"stop_reason": response.stop_reason},
+                )
                 if not max_tokens_escalated:
                     self.client.set_max_output_tokens(MAX_TOKENS_CEILING)
                     max_tokens_escalated = True
@@ -628,6 +955,11 @@ class Agent:
                 if self.file_history is not None:
                     summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
                     self.file_history.make_snapshot(len(conversation.history), summary)
+                self._finish_control_step(
+                    StepStatus.COMPLETED,
+                    response=response,
+                    event_payload={"stop_reason": response.stop_reason},
+                )
                 yield LoopComplete(total_turns=iteration)
                 break
 
@@ -651,13 +983,34 @@ class Agent:
                 response.cache_read,
                 response.cache_creation,
             )
+            self._register_control_tool_calls(response.tool_calls)
 
             tool_results: list[ToolResultBlock] = []
             batches = partition_tool_calls(response.tool_calls, self.registry)
 
             for batch in batches:
                 if batch.concurrent and len(batch.calls) > 1:
-                    batch_results = await self._execute_batch_parallel(batch.calls)
+                    result_by_id: dict[str, _ToolExecResult] = {}
+                    calls_to_execute: list[ToolCallComplete] = []
+                    for tc in batch.calls:
+                        existing = self._control_existing_tool_result(tc.tool_id)
+                        if existing is not None:
+                            result, elapsed, is_unknown = existing
+                            result_by_id[tc.tool_id] = _ToolExecResult(
+                                tool_id=tc.tool_id,
+                                tool_name=tc.tool_name,
+                                result=result,
+                                elapsed=elapsed,
+                                is_unknown=is_unknown,
+                            )
+                        else:
+                            self._transition_control_tool(
+                                tc.tool_id, ToolCallStatus.RUNNING
+                            )
+                            calls_to_execute.append(tc)
+                    for executed in await self._execute_batch_parallel(calls_to_execute):
+                        result_by_id[executed.tool_id] = executed
+                    batch_results = [result_by_id[tc.tool_id] for tc in batch.calls]
                     for br in batch_results:
                         if br.is_unknown:
                             consecutive_unknown += 1
@@ -665,6 +1018,15 @@ class Agent:
                             consecutive_unknown = 0
                         content = self._maybe_persist_or_truncate(
                             br.tool_id, br.result.output
+                        )
+                        self._transition_control_tool(
+                            br.tool_id,
+                            self._tool_terminal_status(br.result),
+                            result=br.result,
+                            elapsed=br.elapsed,
+                            result_path=self._control_result_path(
+                                br.tool_id, br.result.output
+                            ),
                         )
                         tool_results.append(
                             ToolResultBlock(
@@ -685,8 +1047,15 @@ class Agent:
                         result: ToolResult | None = None
                         elapsed = 0.0
                         is_unknown = False
+                        reused = self._control_existing_tool_result(tc.tool_id)
+                        if reused is not None:
+                            result, elapsed, is_unknown = reused
+                        else:
+                            self._transition_control_tool(
+                                tc.tool_id, ToolCallStatus.RUNNING
+                            )
 
-                        if self.hook_engine:
+                        if result is None and self.hook_engine:
                             file_path = self._infer_file_path(tc.arguments)
                             hook_ctx = self._build_hook_context(
                                 "pre_tool_use",
@@ -705,6 +1074,15 @@ class Agent:
                                 content = self._maybe_persist_or_truncate(
                                     tc.tool_id, result.output
                                 )
+                                self._transition_control_tool(
+                                    tc.tool_id,
+                                    ToolCallStatus.DENIED,
+                                    result=result,
+                                    elapsed=0.0,
+                                    result_path=self._control_result_path(
+                                        tc.tool_id, result.output
+                                    ),
+                                )
                                 tool_results.append(
                                     ToolResultBlock(
                                         tool_use_id=tc.tool_id,
@@ -721,11 +1099,12 @@ class Agent:
                                 )
                                 continue
 
-                        async for item in self._execute_tool(tc):
-                            if isinstance(item, PermissionRequest):
-                                yield item
-                            else:
-                                result, elapsed, is_unknown = item
+                        if result is None:
+                            async for item in self._execute_tool(tc):
+                                if isinstance(item, PermissionRequest):
+                                    yield item
+                                else:
+                                    result, elapsed, is_unknown = item
 
                         if result is None:
                             result = ToolResult(output="Error: no result from tool", is_error=True)
@@ -735,7 +1114,7 @@ class Agent:
                         else:
                             consecutive_unknown = 0
 
-                        if self.hook_engine:
+                        if reused is None and self.hook_engine:
                             file_path = self._infer_file_path(tc.arguments)
                             hook_ctx = self._build_hook_context(
                                 "post_tool_use",
@@ -749,6 +1128,15 @@ class Agent:
 
                         content = self._maybe_persist_or_truncate(
                             tc.tool_id, result.output
+                        )
+                        self._transition_control_tool(
+                            tc.tool_id,
+                            self._tool_terminal_status(result),
+                            result=result,
+                            elapsed=elapsed,
+                            result_path=self._control_result_path(
+                                tc.tool_id, result.output
+                            ),
                         )
                         tool_results.append(
                             ToolResultBlock(
@@ -766,6 +1154,11 @@ class Agent:
                         )
 
             if consecutive_unknown >= 3:
+                self._finish_control_step(
+                    StepStatus.FAILED,
+                    response=response,
+                    error="Too many consecutive unknown tool calls",
+                )
                 yield ErrorEvent(
                     message="Agent terminated: too many consecutive unknown tool calls"
                 )
@@ -775,6 +1168,11 @@ class Agent:
                 tc.tool_name == "ExitPlanMode" for tc in response.tool_calls
             )
             conversation.add_tool_results_message(tool_results)
+            self._finish_control_step(
+                StepStatus.COMPLETED,
+                response=response,
+                event_payload={"tool_call_count": len(response.tool_calls)},
+            )
 
             # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
             if self.memory_recall_task and not self._memory_recall_consumed:
@@ -912,6 +1310,14 @@ class Agent:
                 loop = asyncio.get_running_loop()
                 future: asyncio.Future[PermissionResponse] = loop.create_future()
                 desc = self._build_permission_description(tc)
+                self._finish_control_step(
+                    StepStatus.BLOCKED,
+                    event_payload={
+                        "reason": "permission",
+                        "tool_name": tc.tool_name,
+                    },
+                )
+                self._finish_control_run(RunStatus.BLOCKED)
                 # 向调用方 yield 权限请求事件，由调用方处理
                 yield PermissionRequest(
                     tool_name=tc.tool_name,
@@ -919,6 +1325,8 @@ class Agent:
                     future=future,
                 )
                 response = await future
+                self._finish_control_run(RunStatus.RUNNING)
+                self._finish_control_step(StepStatus.RUNNING)
 
                 if response == PermissionResponse.DENY:
                     result = ToolResult(
@@ -1050,6 +1458,38 @@ class Agent:
     ) -> str:
         if conversation is None:
             conversation = ConversationManager()
+        self._start_control_run(conversation, input_text=task)
+        try:
+            result, completed = await self._run_to_completion_loop(
+                task, conversation, event_callback
+            )
+        except asyncio.CancelledError:
+            self._cancel_control_tools()
+            self._finish_control_step(StepStatus.CANCELLED, error="Agent run cancelled")
+            self._finish_control_run(RunStatus.CANCELLED, error="Agent run cancelled")
+            raise
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            self._finish_control_step(StepStatus.FAILED, error=message)
+            self._finish_control_run(RunStatus.FAILED, error=message)
+            raise
+        if completed:
+            self._finish_control_run(RunStatus.COMPLETED)
+        else:
+            self._finish_control_step(
+                StepStatus.INTERRUPTED, error="Agent loop ended without completion"
+            )
+            self._finish_control_run(
+                RunStatus.INTERRUPTED, error="Agent loop ended without completion"
+            )
+        return result
+
+    async def _run_to_completion_loop(
+        self, task: str, conversation: ConversationManager | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[str, bool]:
+        if conversation is None:
+            conversation = ConversationManager()
 
             env_context = build_environment_context(
                 self.work_dir, self.active_skills, self._skill_catalog, self._agent_catalog
@@ -1084,6 +1524,7 @@ class Agent:
         )
 
         last_text = ""
+        completed = False
 
         iteration = 0
         while True:
@@ -1136,6 +1577,7 @@ class Agent:
             if _new_records:
                 append_replacement_records(self.session_dir, _new_records)
 
+            self._start_control_step(iteration)
             collector = StreamCollector()
             llm_stream = self.client.stream(conversation, system=system, tools=tools)
             async for _event in collector.consume(llm_stream):
@@ -1173,6 +1615,12 @@ class Agent:
                 if self.file_history is not None:
                     summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
                     self.file_history.make_snapshot(len(conversation.history), summary)
+                self._finish_control_step(
+                    StepStatus.COMPLETED,
+                    response=response,
+                    event_payload={"stop_reason": response.stop_reason},
+                )
+                completed = True
                 break
 
             tool_uses = [
@@ -1192,6 +1640,7 @@ class Agent:
                 response.cache_read,
                 response.cache_creation,
             )
+            self._register_control_tool_calls(response.tool_calls)
 
             tool_results: list[ToolResultBlock] = []
             for tc in response.tool_calls:
@@ -1201,8 +1650,22 @@ class Agent:
                         "toolName": tc.tool_name,
                         "args": tc.arguments,
                     })
-                result = await self._execute_tool_noninteractive(tc)
+                existing = self._control_existing_tool_result(tc.tool_id)
+                if existing is not None:
+                    result, elapsed, _ = existing
+                else:
+                    self._transition_control_tool(tc.tool_id, ToolCallStatus.RUNNING)
+                    started = time.monotonic()
+                    result = await self._execute_tool_noninteractive(tc)
+                    elapsed = time.monotonic() - started
                 content = self._maybe_persist_or_truncate(tc.tool_id, result.output)
+                self._transition_control_tool(
+                    tc.tool_id,
+                    self._tool_terminal_status(result),
+                    result=result,
+                    elapsed=elapsed,
+                    result_path=self._control_result_path(tc.tool_id, result.output),
+                )
                 tool_results.append(
                     ToolResultBlock(
                         tool_use_id=tc.tool_id,
@@ -1212,12 +1675,17 @@ class Agent:
                 )
 
             conversation.add_tool_results_message(tool_results)
+            self._finish_control_step(
+                StepStatus.COMPLETED,
+                response=response,
+                event_payload={"tool_call_count": len(response.tool_calls)},
+            )
 
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_end")
                 await self.hook_engine.run_hooks("turn_end", ctx)
 
-        return last_text
+        return last_text, completed
 
     async def _execute_tool_noninteractive(
         self, tc: ToolCallComplete

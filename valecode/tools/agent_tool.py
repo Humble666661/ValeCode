@@ -93,6 +93,20 @@ class AgentTool(Tool):
         self._team_manager = team_manager
         self.query_source: str = ""
 
+    def _inherit_runtime_state(self, sub_agent: Agent) -> None:
+        """Attach a child to the parent's durable run and trace context."""
+        sub_agent.parent_id = self._parent_agent.agent_id
+        sub_agent.parent_run_id = self._parent_agent._current_run_id
+        sub_agent.trace_id = (
+            self._parent_agent._current_trace_id
+            or self._parent_agent.trace_id
+            or self._parent_agent.agent_id
+        )
+        sub_agent.session_id = self._parent_agent.session_id
+        sub_agent.run_store = self._parent_agent.run_store
+        sub_agent.provider_name = self._parent_agent.provider_name
+        sub_agent.model = self._parent_agent.model
+
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]
 
@@ -216,8 +230,7 @@ class AgentTool(Tool):
             instructions_content=definition.system_prompt,
             hook_engine=self._parent_agent.hook_engine,
         )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        self._inherit_runtime_state(sub_agent)
 
         # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
         # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
@@ -410,8 +423,7 @@ class AgentTool(Tool):
             instructions_content=instructions,
             hook_engine=self._parent_agent.hook_engine,
         )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        self._inherit_runtime_state(sub_agent)
         sub_agent.agent_id = agent_id
         sub_agent.team_name = p.team_name
         sub_agent._team_manager = self._team_manager
@@ -613,8 +625,7 @@ class AgentTool(Tool):
             instructions_content=definition.system_prompt,
             hook_engine=self._parent_agent.hook_engine,
         )
-        sub_agent.parent_id = self._parent_agent.agent_id
-        sub_agent.trace_id = self._parent_agent.trace_id or self._parent_agent.agent_id
+        self._inherit_runtime_state(sub_agent)
 
         trace_node = self._trace_manager.create(
             agent_type=definition.agent_type,

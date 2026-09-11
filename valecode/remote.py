@@ -264,6 +264,9 @@ class RemoteServer:
             instructions_content=instructions,
             memory_manager=self.memory_manager,
             hook_engine=self.hook_engine,
+            run_store=self.session_manager.run_store,
+            provider_name=provider.name,
+            model=provider.model,
         )
         self.agent.session_id = self.session_id
 

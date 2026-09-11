@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from valecode.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from valecode.persistence import Database, RunStore, SessionStore, TaskStore
 
 SESSIONS_DIR = ".valecode/sessions"
 DEFAULT_MAX_AGE_DAYS = 30
@@ -362,11 +363,25 @@ class Session:
         file: IO[str],
         meta: SessionMeta,
         sessions_dir: Path,
+        state_store: SessionStore | None = None,
     ) -> None:
         self.session_id = session_id
         self._file = file
         self.meta = meta
         self._sessions_dir = sessions_dir
+        self._state_store = state_store
+
+    def _sync_state(self) -> None:
+        if self._state_store is None:
+            return
+        self._state_store.upsert(
+            self.session_id,
+            title=self.meta.title,
+            summary=self.meta.summary,
+            message_count=self.meta.message_count,
+            total_tokens=self.meta.total_tokens,
+            created_at=self.meta.created_at.isoformat(),
+        )
 
     def append(self, message: Message) -> None:
         records = SessionRecord.from_message(message)
@@ -381,6 +396,7 @@ class Session:
             self.meta.title = message.content[:TITLE_MAX_LENGTH]
 
         self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+        self._sync_state()
 
     def append_record(self, record: SessionRecord) -> None:
         """追加一条原始 SessionRecord（例如 compact_boundary 标记）。
@@ -393,12 +409,14 @@ class Session:
         self._file.flush()
         self.meta.last_active = datetime.now(timezone.utc)
         self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
+        self._sync_state()
 
 
     def close(self) -> None:
         if self._file and not self._file.closed:
             self._file.flush()
             self._file.close()
+        self._sync_state()
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +483,19 @@ class SessionManager:
     def __init__(self, work_dir: str) -> None:
         self._sessions_dir = Path(work_dir) / SESSIONS_DIR
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.database = Database(self._sessions_dir.parent / "control.db")
+        self.database.initialize()
+        self.session_store = SessionStore(self.database)
+        self.run_store = RunStore(self.database)
+        self.task_store = TaskStore(self.database)
+        self.recovered_tasks = self.task_store.recover_expired_leases()
+        # Reconcile stale running state before a new Agent can start. The
+        # report is retained so UI/CLI callers can surface confirmation needs.
+        from valecode.runtime.recovery import RecoveryService
+
+        self.recovery_report = RecoveryService(
+            self.run_store, work_dir
+        ).scan_and_reconcile()
 
 
     def create(self) -> Session:
@@ -472,6 +503,10 @@ class SessionManager:
         jsonl_path = self._sessions_dir / f"{session_id}.jsonl"
         meta = SessionMeta(id=session_id)
         meta.save(self._sessions_dir / f"{session_id}.meta")
+        self.session_store.upsert(
+            session_id,
+            created_at=meta.created_at.isoformat(),
+        )
 
         file = open(jsonl_path, "a", encoding="utf-8")  # noqa: SIM115
         return Session(
@@ -479,6 +514,7 @@ class SessionManager:
             file=file,
             meta=meta,
             sessions_dir=self._sessions_dir,
+            state_store=self.session_store,
         )
 
 
@@ -533,7 +569,9 @@ class SessionManager:
             file=file,
             meta=meta,
             sessions_dir=self._sessions_dir,
+            state_store=self.session_store,
         )
+        session._sync_state()
 
         return ResumeResult(
             session=session,
@@ -551,6 +589,8 @@ class SessionManager:
             deleted = True
         if meta_path.exists():
             meta_path.unlink()
+            deleted = True
+        if self.session_store.delete(session_id):
             deleted = True
         return deleted
 

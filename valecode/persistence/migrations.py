@@ -197,9 +197,34 @@ def _migration_002_task_dependencies(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_003_compact_checkpoints(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE checkpoints (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            run_id TEXT,
+            step_id TEXT,
+            kind TEXT NOT NULL,
+            tail_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            transcript_offset INTEGER NOT NULL CHECK (transcript_offset >= 0),
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_checkpoints_session_offset ON checkpoints(session_id, transcript_offset)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_checkpoints_run ON checkpoints(run_id) WHERE run_id IS NOT NULL"
+    )
+
+
 MIGRATIONS = (
     Migration(1, "initial_control_plane", _migration_001_initial_control_plane),
     Migration(2, "task_dependencies", _migration_002_task_dependencies),
+    Migration(3, "compact_checkpoints", _migration_003_compact_checkpoints),
 )
 
 

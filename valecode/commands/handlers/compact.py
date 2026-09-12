@@ -27,7 +27,15 @@ async def handle_compact(ctx: CommandContext) -> None:
             from valecode.memory.session import make_compact_boundary
 
             ctx.session.append_record(
-                make_compact_boundary(result.boundary.summary, result.boundary.keep)
+                make_compact_boundary(
+                    result.boundary.summary,
+                    result.boundary.keep,
+                    tail_id=result.boundary.tail_id,
+                    attachment=result.boundary.attachment,
+                    transcript_path=result.boundary.transcript_path,
+                    run_id=result.run_id,
+                    step_id=result.step_id,
+                )
             )
         ctx.ui.add_system_message(result.message)
     elif isinstance(result, ErrorEvent):
@@ -42,4 +50,3 @@ COMPACT_COMMAND = Command(
     type=CommandType.LOCAL,
     handler=handle_compact,
 )
-

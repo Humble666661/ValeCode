@@ -1052,6 +1052,11 @@ class VelaCodeApp(App):
         record = make_compact_boundary(
             notification.boundary.summary,
             notification.boundary.keep,
+            tail_id=notification.boundary.tail_id,
+            attachment=notification.boundary.attachment,
+            transcript_path=notification.boundary.transcript_path,
+            run_id=notification.run_id,
+            step_id=notification.step_id,
         )
         self.session.append_record(record)
 

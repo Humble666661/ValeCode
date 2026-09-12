@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,50 @@ class Message:
     tool_uses: list[ToolUseBlock] = field(default_factory=list)
     tool_results: list[ToolResultBlock] = field(default_factory=list)
     thinking_blocks: list[ThinkingBlock] = field(default_factory=list)
+
+
+def message_tail_id(messages: list[Message]) -> str:
+    """Return a stable content identifier for an ordered message tail.
+
+    The identifier deliberately excludes process-local state and timestamps.  It
+    can therefore be stored beside a compact checkpoint and recomputed during
+    resume to detect a partial or corrupted boundary write.
+    """
+    payload = [
+        {
+            "role": message.role,
+            "content": message.content,
+            "tool_uses": [
+                {
+                    "tool_use_id": block.tool_use_id,
+                    "tool_name": block.tool_name,
+                    "arguments": block.arguments,
+                }
+                for block in message.tool_uses
+            ],
+            "tool_results": [
+                {
+                    "tool_use_id": block.tool_use_id,
+                    "content": block.content,
+                    "is_error": block.is_error,
+                }
+                for block in message.tool_results
+            ],
+            "thinking_blocks": [
+                {"thinking": block.thinking, "signature": block.signature}
+                for block in message.thinking_blocks
+            ],
+        }
+        for message in messages
+    ]
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return "tail_" + hashlib.sha256(canonical).hexdigest()
 
 
 # 估算最后一次 API 用量锚点之后追加的消息 token 开销时使用的字符/token 比率。

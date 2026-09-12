@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from valecode.persistence import (
+    CheckpointStore,
     Database,
     EventStore,
     InvalidTransitionError,
@@ -23,12 +24,12 @@ from valecode.persistence.migrations import MigrationError
 @pytest.fixture
 def database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "control.db")
-    assert database.initialize() == 2
+    assert database.initialize() == 3
     return database
 
 
 def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
-    assert database.initialize() == 2
+    assert database.initialize() == 3
     with database.reader() as connection:
         tables = {
             row["name"]
@@ -50,15 +51,16 @@ def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
         "task_attempts",
         "task_dependencies",
         "run_events",
+        "checkpoints",
     }.issubset(tables)
-    assert version == 2
+    assert version == 3
     assert journal_mode == "wal"
     assert foreign_keys == 1
 
 
 def test_newer_database_version_is_rejected(tmp_path: Path) -> None:
     database = Database(tmp_path / "future.db")
-    assert database.initialize() == 2
+    assert database.initialize() == 3
     with database.transaction(immediate=True) as connection:
         connection.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) VALUES (99, 'future', 'now')"
@@ -66,6 +68,27 @@ def test_newer_database_version_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(MigrationError, match="newer than supported"):
         database.initialize()
+
+
+def test_checkpoint_store_indexes_transcript_boundary(database: Database) -> None:
+    SessionStore(database).upsert("session-1")
+    store = CheckpointStore(database)
+    checkpoint = store.upsert(
+        "checkpoint-1",
+        "session-1",
+        kind="compact",
+        tail_id="tail-1",
+        payload={"summary": "saved"},
+        transcript_offset=42,
+        run_id="run-1",
+        step_id="step-1",
+    )
+
+    assert checkpoint.tail_id == "tail-1"
+    assert checkpoint.payload == {"summary": "saved"}
+    assert checkpoint.transcript_offset == 42
+    assert store.get("checkpoint-1") == checkpoint
+    assert store.list_for_session("session-1") == [checkpoint]
 
 
 def test_session_store_upsert_and_invalid_json_fallback(database: Database) -> None:

@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import string
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import IO, Any
 
-from valecode.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from valecode.conversation import (
+    ConversationManager,
+    Message,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    message_tail_id,
+)
 from valecode.observability import get_tracing
-from valecode.persistence import Database, RunStore, SessionStore, TaskStore
+from valecode.persistence import (
+    CheckpointStore,
+    Database,
+    RunStore,
+    SessionStore,
+    TaskStore,
+)
+
+log = logging.getLogger(__name__)
 
 SESSIONS_DIR = ".valecode/sessions"
 DEFAULT_MAX_AGE_DAYS = 30
@@ -93,8 +110,16 @@ class SessionRecord:
                     )
                 )
         elif message.role == "assistant":
-            if message.tool_uses:
+            if message.tool_uses or message.thinking_blocks:
                 content_blocks: list[dict[str, Any]] = []
+                for thinking in message.thinking_blocks:
+                    content_blocks.append(
+                        {
+                            "type": "thinking",
+                            "thinking": thinking.thinking,
+                            "signature": thinking.signature,
+                        }
+                    )
                 if message.content:
                     content_blocks.append({"type": "text", "text": message.content})
                 for tu in message.tool_uses:
@@ -145,7 +170,31 @@ def _message_to_record_dicts(message: Message) -> list[dict[str, Any]]:
     return dicts
 
 
-def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
+@dataclass(frozen=True)
+class CompactBoundaryData:
+    summary: str = ""
+    keep: list[Message] = field(default_factory=list)
+    tail_id: str = ""
+    attachment: str = ""
+    transcript_path: str = ""
+    checkpoint_id: str = ""
+    run_id: str | None = None
+    step_id: str | None = None
+    version: int = 1
+    integrity_valid: bool = False
+
+
+def make_compact_boundary(
+    summary: str,
+    keep: list[Message],
+    *,
+    tail_id: str = "",
+    attachment: str = "",
+    transcript_path: str = "",
+    checkpoint_id: str = "",
+    run_id: str | None = None,
+    step_id: str | None = None,
+) -> SessionRecord:
     """构建一条 COMPACT_BOUNDARY record，内联摘要和原样保留的 keep 尾部。
 
     `keep` 是 auto_compact 原样保留的近期尾部消息。将其存储在 boundary record
@@ -155,7 +204,18 @@ def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
     keep_dicts: list[dict[str, Any]] = []
     for msg in keep:
         keep_dicts.extend(_message_to_record_dicts(msg))
-    payload = {"summary": summary, "keep": keep_dicts}
+    computed_tail_id = message_tail_id(keep)
+    payload = {
+        "version": 2,
+        "checkpoint_id": checkpoint_id or f"checkpoint_{uuid.uuid4().hex}",
+        "summary": summary,
+        "keep": keep_dicts,
+        "tail_id": tail_id or computed_tail_id,
+        "attachment": attachment,
+        "transcript_path": transcript_path,
+        "run_id": run_id,
+        "step_id": step_id,
+    }
     return SessionRecord(
         type=RecordType.COMPACT_BOUNDARY,
         content=payload,
@@ -163,19 +223,19 @@ def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
     )
 
 
-def parse_compact_boundary(record: SessionRecord) -> tuple[str, list[Message]]:
-    """make_compact_boundary 的逆操作：返回 (summary, keep_messages)。
-
-    对遗留或格式异常的 payload 降级返回 ("", [])，确保单条损坏的 boundary
-    不会导致 resume 崩溃。
-    """
+def parse_compact_boundary_details(record: SessionRecord) -> CompactBoundaryData:
+    """Parse and verify the complete compact-checkpoint payload."""
     content = record.content
     if not isinstance(content, dict):
-        return "", []
+        return CompactBoundaryData()
     summary = content.get("summary", "")
+    if not isinstance(summary, str):
+        return CompactBoundaryData()
     keep_raw = content.get("keep", [])
+    if not isinstance(keep_raw, list):
+        return CompactBoundaryData()
     keep_records: list[SessionRecord] = []
-    for item in keep_raw if isinstance(keep_raw, list) else []:
+    for item in keep_raw:
         if not isinstance(item, dict) or "type" not in item:
             continue
         try:
@@ -190,7 +250,42 @@ def parse_compact_boundary(record: SessionRecord) -> tuple[str, list[Message]]:
             )
         except ValueError:
             continue
-    return summary, records_to_messages(keep_records)
+    keep = records_to_messages(keep_records)
+    stored_tail_id = content.get("tail_id", "")
+    if not isinstance(stored_tail_id, str):
+        stored_tail_id = ""
+    # Version-1 boundaries had no digest and remain valid for compatibility.
+    integrity_valid = not stored_tail_id or stored_tail_id == message_tail_id(keep)
+
+    def _text(name: str) -> str:
+        value = content.get(name, "")
+        return value if isinstance(value, str) else ""
+
+    version = content.get("version", 1)
+    return CompactBoundaryData(
+        summary=summary,
+        keep=keep,
+        tail_id=stored_tail_id,
+        attachment=_text("attachment"),
+        transcript_path=_text("transcript_path"),
+        checkpoint_id=_text("checkpoint_id"),
+        run_id=content.get("run_id") if isinstance(content.get("run_id"), str) else None,
+        step_id=content.get("step_id") if isinstance(content.get("step_id"), str) else None,
+        version=version if isinstance(version, int) else 1,
+        integrity_valid=integrity_valid,
+    )
+
+
+def parse_compact_boundary(record: SessionRecord) -> tuple[str, list[Message]]:
+    """make_compact_boundary 的逆操作：返回 (summary, keep_messages)。
+
+    对遗留或格式异常的 payload 降级返回 ("", [])，确保单条损坏的 boundary
+    不会导致 resume 崩溃。
+    """
+    details = parse_compact_boundary_details(record)
+    if not details.integrity_valid:
+        return "", []
+    return details.summary, details.keep
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +335,21 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             # resume() 通常已预裁剪到最后一个 boundary，所以这里只会处理
             # 权威的那一条；但在此展开可以保证 records_to_messages 对任何
             # 直接调用者都保持自洽。
-            summary, keep_messages = parse_compact_boundary(record)
-            messages.append(Message(role="user", content="本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + summary))
-            messages.extend(keep_messages)
+            details = parse_compact_boundary_details(record)
+            if not details.integrity_valid:
+                continue
+            content = "本次会话延续自之前的对话，因上下文空间不足进行了压缩。以下是早期对话的摘要：\n\n" + details.summary
+            if details.keep:
+                content += "\n\n近期消息已原样保留。"
+            if details.transcript_path:
+                content += (
+                    "\n\n如果你需要压缩前的具体细节（代码片段、报错信息等），"
+                    f"请用 ReadFile 读取完整会话记录：{details.transcript_path}"
+                )
+            if details.attachment:
+                content += "\n\n---\n\n" + details.attachment
+            messages.append(Message(role="user", content=content))
+            messages.extend(details.keep)
             continue
 
         if record.type == RecordType.USER:
@@ -251,6 +358,7 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
             if isinstance(record.content, list):
                 text = ""
                 tool_uses: list[ToolUseBlock] = []
+                thinking_blocks: list[ThinkingBlock] = []
                 for block in record.content:
                     if not isinstance(block, dict):
                         continue
@@ -264,8 +372,20 @@ def records_to_messages(records: list[SessionRecord]) -> list[Message]:
                                 arguments=block.get("input", {}),
                             )
                         )
+                    elif block.get("type") == "thinking":
+                        thinking_blocks.append(
+                            ThinkingBlock(
+                                thinking=block.get("thinking", ""),
+                                signature=block.get("signature", ""),
+                            )
+                        )
                 messages.append(
-                    Message(role="assistant", content=text, tool_uses=tool_uses)
+                    Message(
+                        role="assistant",
+                        content=text,
+                        tool_uses=tool_uses,
+                        thinking_blocks=thinking_blocks,
+                    )
                 )
             else:
                 messages.append(
@@ -365,12 +485,14 @@ class Session:
         meta: SessionMeta,
         sessions_dir: Path,
         state_store: SessionStore | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ) -> None:
         self.session_id = session_id
         self._file = file
         self.meta = meta
         self._sessions_dir = sessions_dir
         self._state_store = state_store
+        self._checkpoint_store = checkpoint_store
 
     def _sync_state(self) -> None:
         if self._state_store is None:
@@ -406,11 +528,39 @@ class Session:
         结构性标记而非对话轮次。last_active 仍会更新，以保证 session 按最近
         使用排序。
         """
+        transcript_offset = self._file.tell()
         self._file.write(record.to_jsonl() + "\n")
         self._file.flush()
         self.meta.last_active = datetime.now(timezone.utc)
         self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
         self._sync_state()
+        if record.type == RecordType.COMPACT_BOUNDARY:
+            self._index_checkpoint(record, transcript_offset)
+
+    def _index_checkpoint(
+        self, record: SessionRecord, transcript_offset: int
+    ) -> None:
+        if self._checkpoint_store is None:
+            return
+        details = parse_compact_boundary_details(record)
+        if not details.integrity_valid or not details.checkpoint_id:
+            return
+        try:
+            self._checkpoint_store.upsert(
+                details.checkpoint_id,
+                self.session_id,
+                kind="compact",
+                tail_id=details.tail_id,
+                payload=record.content,
+                transcript_offset=transcript_offset,
+                run_id=details.run_id,
+                step_id=details.step_id,
+                created_at=record.timestamp.isoformat(),
+            )
+        except Exception:
+            # JSONL is the source of truth.  A resume pass retries this index
+            # write, avoiding loss of the durable conversation boundary.
+            log.exception("Failed to index checkpoint %s", details.checkpoint_id)
 
 
     def close(self) -> None:
@@ -430,6 +580,10 @@ class ResumeResult:
     session: Session
     messages: list[Message]
     last_active: datetime
+    checkpoint_id: str | None = None
+    tail_id: str | None = None
+    run_id: str | None = None
+    step_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +641,7 @@ class SessionManager:
         self.database = Database(self._sessions_dir.parent / "control.db")
         self.database.initialize()
         self.session_store = SessionStore(self.database)
+        self.checkpoint_store = CheckpointStore(self.database)
         self.run_store = RunStore(self.database)
         self.task_store = TaskStore(self.database)
         self.recovered_tasks = self.task_store.recover_expired_leases()
@@ -516,6 +671,7 @@ class SessionManager:
             meta=meta,
             sessions_dir=self._sessions_dir,
             state_store=self.session_store,
+            checkpoint_store=self.checkpoint_store,
         )
 
 
@@ -555,23 +711,63 @@ class SessionManager:
             return None
 
         records: list[SessionRecord] = []
+        record_offsets: list[int] = []
         with open(jsonl_path, encoding="utf-8") as f:
-            for line in f:
+            while True:
+                offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
                 line = line.strip()
                 if not line:
                     continue
                 record = SessionRecord.from_jsonl(line)
                 if record is not None:
                     records.append(record)
+                    record_offsets.append(offset)
+
+        # Ensure legacy JSONL-only sessions have a parent row before indexes
+        # are reconciled into SQLite.
+        self.session_store.upsert(
+            session_id,
+            title=meta.title,
+            summary=meta.summary,
+            message_count=meta.message_count,
+            total_tokens=meta.total_tokens,
+            created_at=meta.created_at.isoformat(),
+        )
 
         # 重建压缩后的状态：仅从最后一个 compact_boundary 开始重放。
         # 该标记之前的 record 是已被摘要过的原始前缀——保留在磁盘上供审计，
         # 但不再重放。标记本身内联了摘要 + 原样 keep 尾部，标记之后追加的
         # 普通消息（续写）照常重放。没有 boundary 则全量重放（兼容旧 session）。
         last_boundary = -1
+        active_checkpoint: CompactBoundaryData | None = None
         for i, rec in enumerate(records):
             if rec.type == RecordType.COMPACT_BOUNDARY:
+                details = parse_compact_boundary_details(rec)
+                if not details.integrity_valid:
+                    continue
                 last_boundary = i
+                active_checkpoint = details
+                if details.checkpoint_id:
+                    try:
+                        self.checkpoint_store.upsert(
+                            details.checkpoint_id,
+                            session_id,
+                            kind="compact",
+                            tail_id=details.tail_id,
+                            payload=rec.content,
+                            transcript_offset=record_offsets[i],
+                            run_id=details.run_id,
+                            step_id=details.step_id,
+                            created_at=rec.timestamp.isoformat(),
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to reconcile checkpoint %s",
+                            details.checkpoint_id,
+                        )
         if last_boundary >= 0:
             records = records[last_boundary:]
 
@@ -586,6 +782,7 @@ class SessionManager:
             meta=meta,
             sessions_dir=self._sessions_dir,
             state_store=self.session_store,
+            checkpoint_store=self.checkpoint_store,
         )
         session._sync_state()
 
@@ -593,6 +790,12 @@ class SessionManager:
             session=session,
             messages=messages,
             last_active=meta.last_active,
+            checkpoint_id=(
+                active_checkpoint.checkpoint_id if active_checkpoint else None
+            ),
+            tail_id=active_checkpoint.tail_id if active_checkpoint else None,
+            run_id=active_checkpoint.run_id if active_checkpoint else None,
+            step_id=active_checkpoint.step_id if active_checkpoint else None,
         )
 
     def delete(self, session_id: str) -> bool:

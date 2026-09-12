@@ -36,6 +36,7 @@ from valecode.conversation import (
     ToolResultBlock,
     ToolUseBlock,
     estimate_tokens,
+    message_tail_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -696,3 +697,28 @@ class TestAutoCompactKeepRecent:
         assert result.boundary.summary == "PREFIX SUMMARY"
         # 保留的尾部与原样沿用下来的内容完全一致。
         assert result.boundary.keep == kept_before
+        assert result.boundary.tail_id == message_tail_id(kept_before)
+
+    async def test_event_carries_recovery_attachment_and_transcript(
+        self, tmp_path: Path
+    ) -> None:
+        from valecode.context.manager import CompactEvent, RecoveryState
+
+        conv = _make_long_conversation()
+        conv.record_usage_anchor(input_tokens=200_000)
+        recovery = RecoveryState()
+        recovery.record_file_read("src/current.py", "important source")
+
+        result = await auto_compact(
+            conv,
+            _SummaryClient(),
+            context_window=200_000,
+            session_dir=tmp_path,
+            recovery=recovery,
+            transcript_path=".valecode/sessions/session.jsonl",
+        )
+
+        assert isinstance(result, CompactEvent)
+        assert result.boundary is not None
+        assert "src/current.py" in result.boundary.attachment
+        assert result.boundary.transcript_path.endswith("session.jsonl")

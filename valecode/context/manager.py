@@ -15,6 +15,7 @@ from valecode.conversation import (
     Message,
     ToolResultBlock,
     estimate_tokens,
+    message_tail_id,
 )
 from valecode.serialization import build_messages
 from valecode.path_utils import platform_path
@@ -67,6 +68,9 @@ class CompactBoundary:
 
     summary: str
     keep: list[Message]
+    tail_id: str = ""
+    attachment: str = ""
+    transcript_path: str = ""
 
 
 @dataclass
@@ -924,5 +928,11 @@ async def auto_compact(
     # 由它持久化为一条 compact_boundary 记录。keep tail 就是拼回重建 history 的那段。
     return CompactEvent(
         before_tokens=before_tokens,
-        boundary=CompactBoundary(summary=summary, keep=list(keep_tail)),
+        boundary=CompactBoundary(
+            summary=summary,
+            keep=list(keep_tail),
+            tail_id=message_tail_id(list(keep_tail)),
+            attachment=attachment,
+            transcript_path=transcript_path,
+        ),
     )

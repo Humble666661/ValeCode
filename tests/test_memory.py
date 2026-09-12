@@ -30,6 +30,7 @@ from valecode.memory.session import (
 
     make_compact_boundary,
     parse_compact_boundary,
+    parse_compact_boundary_details,
     records_to_messages,
     validate_message_chain,
 )
@@ -440,6 +441,12 @@ class TestCompactBoundaryRoundTrip:
         assert keep_msgs[1].role == "assistant"
         assert keep_msgs[1].content == "recent answer"
 
+        details = parse_compact_boundary_details(restored)
+        assert details.version == 2
+        assert details.checkpoint_id.startswith("checkpoint_")
+        assert details.tail_id.startswith("tail_")
+        assert details.integrity_valid is True
+
     def test_boundary_preserves_tool_pairs_in_keep(self) -> None:
         # 保留的尾部消息中包含 tool_use ↔ tool_result 配对，必须完整保留
         keep = [
@@ -474,6 +481,32 @@ class TestCompactBoundaryRoundTrip:
         summary, keep_msgs = parse_compact_boundary(bad)
         assert summary == ""
         assert keep_msgs == []
+
+    def test_boundary_detects_tampered_tail(self) -> None:
+        rec = make_compact_boundary(
+            "summary", [Message(role="user", content="original")]
+        )
+        rec.content["keep"][0]["content"] = "tampered"
+
+        details = parse_compact_boundary_details(rec)
+        assert details.integrity_valid is False
+        assert parse_compact_boundary(rec) == ("", [])
+
+    def test_boundary_preserves_recovery_and_run_link(self) -> None:
+        rec = make_compact_boundary(
+            "summary",
+            [Message(role="user", content="recent")],
+            attachment="Recent file: src/app.py",
+            transcript_path="session.jsonl",
+            run_id="run-1",
+            step_id="step-1",
+        )
+        details = parse_compact_boundary_details(rec)
+
+        assert details.attachment == "Recent file: src/app.py"
+        assert details.transcript_path == "session.jsonl"
+        assert details.run_id == "run-1"
+        assert details.step_id == "step-1"
 
     def test_resume_rebuilds_compacted_state(self, tmp_path: Path) -> None:
         """核心往返流程：原始前缀 + 边界（摘要 + 保留消息）+ 边界之后的消息。
@@ -553,6 +586,39 @@ class TestCompactBoundaryRoundTrip:
         assert "gen1 kept" not in contents
         assert "between boundaries" not in contents
         assert all("gen0 raw" not in c for c in contents)
+        result.session.close()
+
+    def test_resume_reconciles_checkpoint_index_and_attachment(
+        self, tmp_path: Path
+    ) -> None:
+        mgr = SessionManager(str(tmp_path))
+        session = mgr.create()
+        session_id = session.session_id
+        boundary = make_compact_boundary(
+            "summary",
+            [Message(role="user", content="tail")],
+            attachment="Recent file: src/feature.py",
+            run_id="run-7",
+        )
+        checkpoint_id = boundary.content["checkpoint_id"]
+        session.append_record(boundary)
+        session.close()
+
+        indexed = mgr.checkpoint_store.get(checkpoint_id)
+        assert indexed is not None
+        assert indexed.run_id == "run-7"
+
+        # JSONL remains authoritative: resume recreates a missing SQLite row.
+        with mgr.database.transaction(immediate=True) as connection:
+            connection.execute(
+                "DELETE FROM checkpoints WHERE id = ?", (checkpoint_id,)
+            )
+        result = mgr.resume(session_id)
+        assert result is not None
+        assert result.checkpoint_id == checkpoint_id
+        assert result.run_id == "run-7"
+        assert "src/feature.py" in result.messages[0].content
+        assert mgr.checkpoint_store.get(checkpoint_id) is not None
         result.session.close()
 
     def test_resume_no_boundary_full_replay(self, tmp_path: Path) -> None:

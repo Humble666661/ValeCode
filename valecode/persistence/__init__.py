@@ -1,6 +1,7 @@
 """Durable SQLite control-plane persistence for VelaCode."""
 
 from valecode.persistence.database import Database
+from valecode.persistence.checkpoint_store import CheckpointState, CheckpointStore
 from valecode.persistence.event_store import EventStore
 from valecode.persistence.models import (
     InvalidTransitionError,
@@ -22,6 +23,8 @@ from valecode.persistence.task_store import TaskStore
 
 __all__ = [
     "Database",
+    "CheckpointState",
+    "CheckpointStore",
     "EventStore",
     "InvalidTransitionError",
     "RunEvent",

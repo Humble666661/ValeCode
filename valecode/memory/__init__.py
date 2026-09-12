@@ -18,6 +18,7 @@ from valecode.memory.recall import (
     render_reminder,
 )
 from valecode.memory.session import (
+    CompactBoundaryData,
     ResumeResult,
     Session,
     SessionManager,
@@ -26,12 +27,14 @@ from valecode.memory.session import (
     generate_session_summary,
     make_compact_boundary,
     parse_compact_boundary,
+    parse_compact_boundary_details,
     validate_message_chain,
 )
 
 
 __all__ = [
     "ENTRYPOINT_NAME",
+    "CompactBoundaryData",
     "MemoryFile",
     "MemoryManager",
     "RelevantMemory",
@@ -50,9 +53,9 @@ __all__ = [
     "load_instructions",
     "make_compact_boundary",
     "parse_compact_boundary",
+    "parse_compact_boundary_details",
     "parse_frontmatter",
     "process_includes",
     "render_reminder",
     "validate_message_chain",
 ]
-

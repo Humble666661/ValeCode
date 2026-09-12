@@ -1,6 +1,12 @@
 """Execution reliability helpers for retry, recovery, and idempotency."""
 
 from valecode.runtime.events import EventEnvelope, RuntimeEvent
+from valecode.runtime.execution import (
+    CancellationToken,
+    ExecutionController,
+    ExecutionLimits,
+    ExecutionTimeoutError,
+)
 from valecode.runtime.loop_guard import LoopDecision, LoopGuard
 from valecode.runtime.retry import (
     ErrorCategory,
@@ -12,12 +18,16 @@ from valecode.runtime.retry import (
 
 __all__ = [
     "EventEnvelope",
+    "CancellationToken",
     "ErrorCategory",
     "LoopDecision",
     "LoopGuard",
     "RetryDecision",
     "RetryPolicy",
     "RuntimeEvent",
+    "ExecutionController",
+    "ExecutionLimits",
+    "ExecutionTimeoutError",
     "classify_provider_error",
     "parse_retry_after",
 ]

@@ -1106,6 +1106,7 @@ class VelaCodeApp(App):
         text = event.text.strip()
         if self._streaming and not text.startswith("/"):
             if self._agent_task and not self._agent_task.done():
+                self.agent.cancel("Response superseded by new input")
                 self._agent_task.cancel()
                 try:
                     await self._agent_task
@@ -1212,6 +1213,7 @@ class VelaCodeApp(App):
                         f"Task moved to background (id: {task_id})"
                     )
                     return
+            self.agent.cancel("Cancelled by user")
             self._agent_task.cancel()
 
     async def _prefetch_relevant_memories(self, query: str) -> str:
@@ -1914,6 +1916,7 @@ class VelaCodeApp(App):
     async def action_handle_ctrl_c(self) -> None:
         if self._streaming:
             if self._agent_task and not self._agent_task.done():
+                self.agent.cancel("Cancelled by user")
                 self._agent_task.cancel()
             self._show_system_message("(response interrupted)")
             self._finish_streaming()

@@ -70,6 +70,9 @@ class AgentTool(Tool):
     params_model = AgentToolParams
     category = "command"
     is_concurrency_safe = False
+    # Child tools share the parent's controller. Holding a capacity slot while
+    # waiting for the child would deadlock when the global limit is one.
+    uses_global_capacity = False
 
 
     def __init__(
@@ -107,6 +110,9 @@ class AgentTool(Tool):
         sub_agent.provider_name = self._parent_agent.provider_name
         sub_agent.model = self._parent_agent.model
         sub_agent.tracing = self._parent_agent.tracing
+        sub_agent.execution_controller = self._parent_agent.execution_controller
+        sub_agent.cancellation_token = self._parent_agent.cancellation_token
+        sub_agent._owns_cancellation_token = False
 
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]

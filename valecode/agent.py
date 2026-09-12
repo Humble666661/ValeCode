@@ -43,7 +43,13 @@ from valecode.persistence import (
     ToolCallStatus,
 )
 from valecode.runtime.idempotency import make_tool_idempotency_key
-from valecode.runtime import LoopGuard, RetryPolicy, RuntimeEvent
+from valecode.runtime import (
+    CancellationToken,
+    ExecutionController,
+    LoopGuard,
+    RetryPolicy,
+    RuntimeEvent,
+)
 from valecode.observability import Tracing, get_tracing
 from valecode.hooks import HookContext, HookEngine, ToolRejectedError
 from valecode.hooks.engine import HookNotification
@@ -337,6 +343,8 @@ class Agent:
         tracing: Tracing | None = None,
         retry_policy: RetryPolicy | None = None,
         loop_guard: LoopGuard | None = None,
+        execution_controller: ExecutionController | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -366,6 +374,11 @@ class Agent:
         self.tracing = tracing or get_tracing()
         self.retry_policy = retry_policy or RetryPolicy.from_environment(work_dir)
         self.loop_guard = loop_guard or LoopGuard.from_environment(work_dir)
+        self.execution_controller = (
+            execution_controller or ExecutionController.from_environment(work_dir)
+        )
+        self.cancellation_token = cancellation_token or CancellationToken()
+        self._owns_cancellation_token = cancellation_token is None
         self._current_run_id: str | None = None
         self._current_trace_id: str | None = None
         self._resume_run_id: str | None = None
@@ -787,6 +800,22 @@ class Agent:
             )
         )
 
+    def cancel(self, reason: str = "Agent run cancelled") -> None:
+        self.cancellation_token.cancel(reason)
+
+    async def _execute_registered_tool(
+        self, tool_name: str, params: Any
+    ) -> ToolResult:
+        tool = self.registry.get(tool_name)
+        return await self.execution_controller.execute_tool(
+            lambda: self.registry.execute(tool_name, params),
+            token=self.cancellation_token,
+            tool_name=tool_name,
+            use_capacity=(
+                tool.uses_global_capacity if tool is not None else True
+            ),
+        )
+
     def _prepare_event(self, event: AgentEvent) -> AgentEvent:
         self._event_sequence += 1
         provider_tool_id = getattr(event, "tool_id", None)
@@ -842,8 +871,11 @@ class Agent:
             )
             span = trace_context.__enter__()
             try:
-                llm_stream = self.client.stream(
-                    conversation, system=system, tools=tools
+                llm_stream = self.execution_controller.stream(
+                    self.client.stream(
+                        conversation, system=system, tools=tools
+                    ),
+                    token=self.cancellation_token,
                 )
                 async for event in collector.consume(llm_stream):
                     if first_event_at is None:
@@ -1007,6 +1039,8 @@ class Agent:
             return result
 
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
+        if self._owns_cancellation_token:
+            self.cancellation_token = CancellationToken()
         self._start_control_run(conversation)
         self._event_sequence = 0
         run_id = self._current_run_id
@@ -1035,6 +1069,7 @@ class Agent:
                 yield event
         except asyncio.CancelledError:
             run_status = "cancelled"
+            self.cancel()
             self._cancel_control_tools()
             self._finish_control_step(StepStatus.CANCELLED, error="Agent run cancelled")
             self._finish_control_run(RunStatus.CANCELLED, error="Agent run cancelled")
@@ -1589,7 +1624,7 @@ class Agent:
 
         try:
             params = tool.params_model.model_validate(tc.arguments)
-            result = await self.registry.execute(tc.tool_name, params)
+            result = await self._execute_registered_tool(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(output=f"Parameter validation error: {e}", is_error=True)
         except Exception as e:
@@ -1725,7 +1760,12 @@ class Agent:
                         "tool.call_id": tc.tool_id,
                     },
                 ) as wait_span:
-                    response = await future
+                    response = await self.execution_controller.wait(
+                        future,
+                        token=self.cancellation_token,
+                        timeout=self.execution_controller.limits.permission_timeout,
+                        operation=f"permission response for {tc.tool_name}",
+                    )
                     wait_span.set_attributes({"permission.response": response.value})
                 self._finish_control_run(RunStatus.RUNNING)
                 self._finish_control_step(StepStatus.RUNNING)
@@ -1752,7 +1792,7 @@ class Agent:
 
         try:
             params = tool.params_model.model_validate(tc.arguments)
-            result = await self.registry.execute(tc.tool_name, params)
+            result = await self._execute_registered_tool(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(
                 output=f"Parameter validation error: {e}", is_error=True
@@ -1850,6 +1890,8 @@ class Agent:
     ) -> str:
         if conversation is None:
             conversation = ConversationManager()
+        if self._owns_cancellation_token:
+            self.cancellation_token = CancellationToken()
         self._start_control_run(conversation, input_text=task)
         run_id = self._current_run_id
         trace_context = self.tracing.span(
@@ -1875,6 +1917,7 @@ class Agent:
             )
         except asyncio.CancelledError:
             run_status = "cancelled"
+            self.cancel()
             self._cancel_control_tools()
             self._finish_control_step(StepStatus.CANCELLED, error="Agent run cancelled")
             self._finish_control_run(RunStatus.CANCELLED, error="Agent run cancelled")
@@ -2207,7 +2250,7 @@ class Agent:
 
         try:
             params = tool.params_model.model_validate(tc.arguments)
-            result = await self.registry.execute(tc.tool_name, params)
+            result = await self._execute_registered_tool(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(
                 output=f"Parameter validation error: {e}", is_error=True

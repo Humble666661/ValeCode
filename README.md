@@ -99,4 +99,3 @@ uv run pytest -q
 - 外部 Shell、MCP 和网络副作用无法仅靠本地数据库严格保证 exactly-once。
 - Windows 沙箱依赖可用的 WSL2 发行版与其中安装的 `bubblewrap`。
 - 跨进程恢复依赖持久化控制面中已有的最后安全检查点。
-

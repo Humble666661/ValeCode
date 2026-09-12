@@ -614,6 +614,7 @@ class Agent:
             return
         for tc in calls:
             tool = self.registry.get(tc.tool_name)
+            registration = self.registry.get_registration(tc.tool_name)
             category = getattr(tool, "category", "unknown") if tool else "unknown"
             side_effect_class = {
                 "read": "read",
@@ -636,7 +637,18 @@ class Agent:
                             tc.arguments,
                         ),
                         side_effect_class=side_effect_class,
-                        metadata={"provider_tool_call_id": tc.tool_id},
+                        metadata={
+                            "provider_tool_call_id": tc.tool_id,
+                            "registry_tool_id": (
+                                registration.tool_id if registration else None
+                            ),
+                            "tool_source": (
+                                registration.source.value if registration else "unknown"
+                            ),
+                            "tool_scope": (
+                                registration.scope_id if registration else None
+                            ),
+                        },
                     )
                 )
             )
@@ -1275,7 +1287,7 @@ class Agent:
                         else:
                             consecutive_unknown = 0
                         content = self._maybe_persist_or_truncate(
-                            br.tool_id, br.result.output
+                            br.tool_id, br.result.output, br.tool_name
                         )
                         self._transition_control_tool(
                             br.tool_id,
@@ -1330,7 +1342,7 @@ class Agent:
                                     is_error=True,
                                 )
                                 content = self._maybe_persist_or_truncate(
-                                    tc.tool_id, result.output
+                                    tc.tool_id, result.output, tc.tool_name
                                 )
                                 self._transition_control_tool(
                                     tc.tool_id,
@@ -1385,7 +1397,7 @@ class Agent:
                                 yield he
 
                         content = self._maybe_persist_or_truncate(
-                            tc.tool_id, result.output
+                            tc.tool_id, result.output, tc.tool_name
                         )
                         self._transition_control_tool(
                             tc.tool_id,
@@ -1529,7 +1541,7 @@ class Agent:
 
         try:
             params = tool.params_model.model_validate(tc.arguments)
-            result = await tool.execute(params)
+            result = await self.registry.execute(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(output=f"Parameter validation error: {e}", is_error=True)
         except Exception as e:
@@ -1681,17 +1693,18 @@ class Agent:
 
                 if response == PermissionResponse.ALLOW_ALWAYS:
                     from valecode.permissions.rules import Rule, extract_content
-                    content = extract_content(tc.tool_name, tc.arguments)
+                    permission_name = tool.permission_name
+                    content = extract_content(permission_name, tc.arguments)
                     pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
                     # 持久化规则写入本地文件
-                    rule = Rule(tool_name=tc.tool_name, pattern=pattern, effect="allow")
+                    rule = Rule(tool_name=permission_name, pattern=pattern, effect="allow")
                     self.permission_checker.rule_engine.append_local_rule(rule)
                     # 同时加入会话级放行集合，本轮立即生效无需磁盘读取
-                    self.permission_checker.add_session_allow(tc.tool_name, content)
+                    self.permission_checker.add_session_allow(permission_name, content)
 
         try:
             params = tool.params_model.model_validate(tc.arguments)
-            result = await tool.execute(params)
+            result = await self.registry.execute(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(
                 output=f"Parameter validation error: {e}", is_error=True
@@ -2022,7 +2035,9 @@ class Agent:
                     started = time.monotonic()
                     result = await self._execute_tool_noninteractive(tc)
                     elapsed = time.monotonic() - started
-                content = self._maybe_persist_or_truncate(tc.tool_id, result.output)
+                content = self._maybe_persist_or_truncate(
+                    tc.tool_id, result.output, tc.tool_name
+                )
                 self._transition_control_tool(
                     tc.tool_id,
                     self._tool_terminal_status(result),
@@ -2143,7 +2158,7 @@ class Agent:
 
         try:
             params = tool.params_model.model_validate(tc.arguments)
-            result = await tool.execute(params)
+            result = await self.registry.execute(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(
                 output=f"Parameter validation error: {e}", is_error=True
@@ -2165,7 +2180,9 @@ class Agent:
 
         return result
 
-    def _maybe_persist_or_truncate(self, tool_use_id: str, text: str) -> str:
+    def _maybe_persist_or_truncate(
+        self, tool_use_id: str, text: str, tool_name: str | None = None
+    ) -> str:
         from valecode.context.manager import (
             SINGLE_RESULT_CHAR_LIMIT,
             make_persisted_preview,
@@ -2175,6 +2192,12 @@ class Agent:
         if len(text) > SINGLE_RESULT_CHAR_LIMIT:
             fp = persist_tool_result(tool_use_id, text, self.session_dir)
             return make_persisted_preview(text, fp)
-        if len(text) > MAX_OUTPUT_CHARS:
-            return text[:MAX_OUTPUT_CHARS] + "\n… (output truncated)"
+        registration = (
+            self.registry.get_registration(tool_name) if tool_name is not None else None
+        )
+        output_limit = (
+            registration.output_limit if registration is not None else MAX_OUTPUT_CHARS
+        )
+        if len(text) > output_limit:
+            return text[:output_limit] + "\n… (output truncated)"
         return text

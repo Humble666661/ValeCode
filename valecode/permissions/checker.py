@@ -80,13 +80,14 @@ class PermissionChecker:
 
 
     def check(self, tool: Tool, arguments: dict[str, Any]) -> Decision:
-        content = extract_content(tool.name, arguments)
+        permission_name = tool.permission_name
+        content = extract_content(permission_name, arguments)
 
         # Layer 0: Plan 模式例外放行
         if self.mode == PermissionMode.PLAN:
-            if tool.name in _PLAN_MODE_ALLOWED_TOOLS:
+            if permission_name in _PLAN_MODE_ALLOWED_TOOLS:
                 return Decision(effect="allow", reason="Plan mode: allowed tool")
-            if tool.name in ("WriteFile", "EditFile") and content:
+            if permission_name in ("WriteFile", "EditFile") and content:
                 if self._is_plan_file(content):
                     return Decision(effect="allow", reason="Plan mode: plan file write")
 
@@ -112,7 +113,7 @@ class PermissionChecker:
                 subcommands = [content]
             has_ask = False
             for sub in subcommands:
-                rule_result = self.rule_engine.evaluate(tool.name, sub)
+                rule_result = self.rule_engine.evaluate(permission_name, sub)
                 if rule_result == "deny":
                     return Decision(effect="deny", reason="权限规则拒绝")
                 if rule_result == "ask":
@@ -128,14 +129,14 @@ class PermissionChecker:
                 return Decision(effect="ask", reason=f"路径沙箱拦截: {reason}")
 
         # Layer 3: 规则引擎匹配
-        rule_result = self.rule_engine.evaluate(tool.name, content)
+        rule_result = self.rule_engine.evaluate(permission_name, content)
         if rule_result == "allow":
             return Decision(effect="allow", reason="权限规则放行")
         if rule_result == "deny":
             return Decision(effect="deny", reason="权限规则拒绝")
 
         # Layer 4b: 会话级放行（内存中，优先于模式兜底）
-        if self._check_session_allowed(tool.name, content or ""):
+        if self._check_session_allowed(permission_name, content or ""):
             return Decision(effect="allow", reason="会话级放行（session allow-always）")
 
         # Layer 4: 权限模式兜底判定

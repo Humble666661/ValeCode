@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from valecode.tools import ToolRegistry
+from valecode.tools import ToolRegistry, ToolSource
 
 if TYPE_CHECKING:
     from valecode.agents.parser import AgentDef
@@ -94,8 +94,16 @@ def resolve_agent_tools(
     all_tools = {t.name: t for t in parent_registry.list_tools()}
 
     # 第 0 层：MCP 工具始终放行，先分离出来再做后续过滤
-    mcp_tools = {name: tool for name, tool in all_tools.items() if _is_mcp_tool(name)}
-    all_tools = {name: tool for name, tool in all_tools.items() if not _is_mcp_tool(name)}
+    mcp_tools = {
+        name: tool
+        for name, tool in all_tools.items()
+        if (
+            (registration := parent_registry.get_registration(name)) is not None
+            and registration.source == ToolSource.MCP
+        )
+        or _is_mcp_tool(name)
+    }
+    all_tools = {name: tool for name, tool in all_tools.items() if name not in mcp_tools}
 
     # 第 1 层：全局禁用工具
     for name in ALL_AGENT_DISALLOWED_TOOLS:
@@ -128,10 +136,8 @@ def resolve_agent_tools(
         }
 
     filtered = ToolRegistry()
-    for tool in mcp_tools.values():
-        filtered.register(tool)
-    for tool in all_tools.values():
-        filtered.register(tool)
+    for name in (*mcp_tools, *all_tools):
+        parent_registry.copy_registration_to(filtered, name)
     return filtered
 
 
@@ -185,8 +191,8 @@ def build_teammate_tools(
     ]
 
     registry = ToolRegistry()
-    for tool in filtered.values():
-        registry.register(tool)
+    for name in filtered:
+        parent_registry.copy_registration_to(registry, name)
     for tool in coordination_tools:
         registry.register(tool)
 
@@ -209,9 +215,14 @@ def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
         if tool.name == "Agent" and hasattr(tool, "query_source"):
             clone = copy.copy(tool)
             clone.query_source = FORK_QUERY_SOURCE
-            forked.register(clone)
+            registration = parent_registry.get_registration(tool.name)
+            forked.register(
+                clone,
+                source=registration.source if registration else ToolSource.SESSION,
+                scope_id=registration.scope_id if registration else None,
+            )
         else:
-            forked.register(tool)
+            parent_registry.copy_registration_to(forked, tool.name)
     return forked
 
 
@@ -219,6 +230,9 @@ def apply_coordinator_filter(registry: ToolRegistry) -> ToolRegistry:
     all_tools = {t.name: t for t in registry.list_tools()}
     filtered = ToolRegistry()
     for name, tool in all_tools.items():
-        if _is_mcp_tool(name) or name in COORDINATOR_MODE_ALLOWED_TOOLS:
-            filtered.register(tool)
+        registration = registry.get_registration(name)
+        if (
+            registration is not None and registration.source == ToolSource.MCP
+        ) or _is_mcp_tool(name) or name in COORDINATOR_MODE_ALLOWED_TOOLS:
+            registry.copy_registration_to(filtered, name)
     return filtered

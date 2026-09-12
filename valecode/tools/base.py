@@ -27,6 +27,11 @@ class Tool(ABC):
     is_concurrency_safe: bool = False
     is_system_tool: bool = False
     should_defer: bool = False
+    max_output_chars: int = MAX_OUTPUT_CHARS
+
+    @property
+    def permission_name(self) -> str:
+        return self.name
 
     @property
     def is_read_only(self) -> bool:
@@ -44,6 +49,20 @@ class Tool(ABC):
 
     @abstractmethod
     async def execute(self, params: BaseModel) -> ToolResult: ...
+
+    async def before_execute(self, params: BaseModel) -> None:
+        return None
+
+    async def after_execute(
+        self, params: BaseModel, result: ToolResult
+    ) -> ToolResult:
+        return result
+
+    async def on_error(self, params: BaseModel, error: BaseException) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
 
 
 # --- 流式事件 ---

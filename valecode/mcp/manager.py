@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from valecode.config import MCPServerConfig
 from valecode.mcp.client import MCPClient
 from valecode.mcp.tool_wrapper import MCPToolWrapper
-from valecode.tools import ToolRegistry
+from valecode.tools import ToolRegistry, ToolSource
 from valecode.tools.base import Tool
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ class MCPManager:
     def __init__(self) -> None:
         self._configs: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, MCPClient] = {}
+        self._registry: ToolRegistry | None = None
 
 
     def load_configs(self, configs: list[MCPServerConfig]) -> None:
@@ -79,7 +80,13 @@ class MCPManager:
         """
         result = await self.connect_all()
         for tool in result.tools:
-            registry.register(tool)
+            assert isinstance(tool, MCPToolWrapper)
+            registry.register(
+                tool,
+                source=ToolSource.MCP,
+                scope_id=f"mcp:{tool.server_name}",
+            )
+        self._registry = registry
         return result
 
 
@@ -105,6 +112,11 @@ class MCPManager:
 
 
     async def shutdown(self) -> None:
+        registry = self._registry
+        if registry is not None:
+            for name in self._configs:
+                await registry.release_scope(f"mcp:{name}")
+            self._registry = None
         for name, client in self._clients.items():
             try:
                 await client.close()

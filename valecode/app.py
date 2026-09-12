@@ -730,6 +730,7 @@ class VelaCodeApp(App):
         self.task_manager = DurableTaskManager(self.session_manager.task_store)
         self.session_manager.cleanup()
         self.session = self.session_manager.create()
+        self.registry.bind_session(self.session.session_id)
 
         from valecode.filehistory import FileHistory
         self.file_history = FileHistory(work_dir, self.session.session_id)
@@ -1943,6 +1944,7 @@ class VelaCodeApp(App):
                     )
                 ))
             tasks.append(asyncio.create_task(self._shutdown_mcp()))
+            tasks.append(asyncio.create_task(self.registry.release_session()))
 
             if tasks:
                 await asyncio.wait(tasks, timeout=3.0)

@@ -245,6 +245,7 @@ class RemoteServer:
 
         # 工具注册表
         self.registry = create_default_registry()
+        self.registry.bind_session(self.session_id)
         self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
 
         # Skill 加载

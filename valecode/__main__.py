@@ -177,6 +177,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     session_manager = SessionManager(work_dir)
     session = session_manager.create()
     registry = create_default_registry()
+    registry.bind_session(session.session_id)
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
 
     agent = Agent(
@@ -344,6 +345,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
 
     # 如果有 team 在运行，轮询等待 teammate 完成
     if not team_manager._teams:
+        await registry.release_session()
         return
 
     for i in range(90):
@@ -368,6 +370,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
             emit_json({"type": "assistant", "text": last_result})
         else:
             print(last_result, flush=True)
+
+    await registry.release_session()
 
 
 if __name__ == "__main__":

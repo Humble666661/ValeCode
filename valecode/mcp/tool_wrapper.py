@@ -77,6 +77,10 @@ class MCPToolWrapper(Tool):
     def mcp_tool_name(self) -> str:
         return self._tool_def.name
 
+    @property
+    def server_name(self) -> str:
+        return self._server_name
+
 
     def get_schema(self) -> dict[str, Any]:
         return {

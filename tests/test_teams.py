@@ -40,6 +40,8 @@ from valecode.agents.tool_filter import (
 )
 from valecode.tools import ToolRegistry
 from valecode.tools.base import Tool, ToolResult
+from valecode.persistence import Database, TaskStore
+from valecode.teams.manager import TeamManager
 
 # =====================================================================
 # 辅助工具
@@ -174,7 +176,42 @@ class TestModels:
             assert name2 == "my-team-2"
 
 # =====================================================================
-# 2. SharedTaskStore
+# 2. Durable Team state
+# =====================================================================
+
+def test_team_manager_persists_and_recovers_member_state(tmp_path):
+    database = Database(tmp_path / "control.db")
+    database.initialize()
+    task_store = TaskStore(database)
+    state_home = tmp_path / "state-home"
+    with patch("valecode.teams.models.Path.home", return_value=state_home):
+        manager = TeamManager(task_store=task_store)
+        team = manager.create_team(
+            "durable-team", "lead", teammate_mode="in-process"
+        )
+        member = TeammateInfo(
+            name="worker",
+            agent_id="agent-1",
+            agent_type="general",
+            model="test",
+            worktree_path="",
+            backend_type="in-process",
+            is_active=True,
+        )
+        manager.register_member(team.name, member)
+        manager.set_member_idle(team.name, member.name)
+        Path(team.config_path).unlink()
+
+        restored_manager = TeamManager(task_store=task_store)
+        restored = restored_manager.get_team(team.name)
+        assert restored is not None
+        assert restored.members[0].is_active is False
+        restored_manager.delete_team(team.name)
+        assert restored_manager._team_store.get_team(team.name).status == "deleted"
+
+
+# =====================================================================
+# 3. SharedTaskStore
 # =====================================================================
 
 class TestSharedTaskStore:

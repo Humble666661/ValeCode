@@ -27,6 +27,7 @@ from valecode.persistence import (
     ResultArtifactStore,
     SessionStore,
     TaskStore,
+    TeamStore,
 )
 
 log = logging.getLogger(__name__)
@@ -646,6 +647,7 @@ class SessionManager:
         self.result_artifact_store = ResultArtifactStore(self.database)
         self.run_store = RunStore(self.database)
         self.task_store = TaskStore(self.database)
+        self.team_store = TeamStore(self.database)
         self.recovered_tasks = self.task_store.recover_expired_leases()
         # Reconcile stale running state before a new Agent can start. The
         # report is retained so UI/CLI callers can surface confirmation needs.

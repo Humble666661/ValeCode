@@ -20,6 +20,7 @@ from valecode.teams.registry import AgentNameRegistry
 from valecode.teams.shared_task import DurableSharedTaskStore, SharedTaskStore
 from valecode.teams.spawn_inprocess import InProcessTeammateHandle
 from valecode.worktree.paths import canonical_path, is_path_within, require_path_within
+from valecode.persistence import TeamStore
 
 if TYPE_CHECKING:
     from valecode.agent import Agent
@@ -48,6 +49,8 @@ class TeamManager:
         self._trace_manager = trace_manager
         self._teammate_team_map: dict[str, str] = {}  # agent_id -> team_name
         self._durable_task_store = task_store
+        task_database = getattr(task_store, "database", None)
+        self._team_store = TeamStore(task_database) if task_database is not None else None
 
     def detect_backend(
         self,
@@ -99,11 +102,16 @@ class TeamManager:
         self._teams[slug] = team
         self._task_stores[slug] = task_store
         self._mailboxes[slug] = mailbox
+        if self._team_store is not None:
+            self._team_store.upsert_team(
+                slug,
+                lead_agent_id,
+                description=description,
+                backend_type=backend.value,
+            )
 
         log.info("Created team '%s' at %s (backend=%s)", slug, team_dir, backend.value)
         return team
-
-
     def get_team(self, name: str) -> AgentTeam | None:
         if name in self._teams:
             return self._teams[name]
@@ -112,7 +120,42 @@ class TeamManager:
         if config_path.exists():
             team = AgentTeam.load(str(config_path))
             self._teams[name] = team
+            if self._team_store is not None:
+                current_state = self._team_store.get_team(team.name)
+                self._team_store.upsert_team(
+                    team.name,
+                    team.lead_agent_id,
+                    description=team.description,
+                    backend_type=(
+                        current_state.backend_type if current_state is not None else ""
+                    ),
+                )
+                for member in team.members:
+                    self._team_store.upsert_member(team.name, member)
             return team
+        if self._team_store is not None:
+            state = self._team_store.get_team(name)
+            if state is not None and state.status == "active":
+                team = AgentTeam(
+                    name=state.name,
+                    lead_agent_id=state.lead_agent_id,
+                    description=state.description,
+                    config_path=str(config_path),
+                )
+                for member in self._team_store.list_members(name):
+                    team.add_member(
+                        TeammateInfo(
+                            name=member.name,
+                            agent_id=member.agent_id,
+                            agent_type=member.agent_type,
+                            model=member.model,
+                            worktree_path=member.worktree_path,
+                            backend_type=member.backend_type,
+                            is_active=member.is_active,
+                        )
+                    )
+                self._teams[name] = team
+                return team
         return None
 
     def get_task_store(self, team_name: str) -> SharedTaskStore | None:
@@ -154,6 +197,8 @@ class TeamManager:
 
         AgentNameRegistry.instance().register(member.name, member.agent_id)
         self._teammate_team_map[member.agent_id] = team_name
+        if self._team_store is not None:
+            self._team_store.upsert_member(team_name, member)
         log.info("Registered member '%s' (agent=%s) in team '%s'", member.name, member.agent_id, team_name)
 
     def set_member_idle(self, team_name: str, member_name: str) -> None:
@@ -162,6 +207,8 @@ class TeamManager:
             return
         team.set_member_active(member_name, False)
         team.save()
+        if self._team_store is not None:
+            self._team_store.set_member_active(team_name, member_name, False)
 
         mailbox = self.get_mailbox(team_name)
         if mailbox:
@@ -221,11 +268,18 @@ class TeamManager:
         self._teams.pop(team_name, None)
         self._task_stores.pop(team_name, None)
         self._mailboxes.pop(team_name, None)
+        if self._team_store is not None:
+            self._team_store.mark_deleted(team_name)
 
         log.info("Deleted team '%s'", team_name)
 
     def list_teams(self) -> list[str]:
-        return list(self._teams.keys())
+        names = list(self._teams.keys())
+        if self._team_store is not None:
+            for team in self._team_store.list_active():
+                if team.name not in names:
+                    names.append(team.name)
+        return names
 
     def get_team_for_teammate(self, agent_id: str) -> str | None:
         if agent_id in self._teammate_team_map:

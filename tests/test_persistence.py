@@ -17,6 +17,7 @@ from valecode.persistence import (
     StepStatus,
     TaskStatus,
     TaskStore,
+    TeamStore,
     ToolCallStatus,
 )
 from valecode.persistence.migrations import MigrationError
@@ -25,12 +26,12 @@ from valecode.persistence.migrations import MigrationError
 @pytest.fixture
 def database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "control.db")
-    assert database.initialize() == 4
+    assert database.initialize() == 5
     return database
 
 
 def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
-    assert database.initialize() == 4
+    assert database.initialize() == 5
     with database.reader() as connection:
         tables = {
             row["name"]
@@ -54,15 +55,17 @@ def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
         "run_events",
         "checkpoints",
         "result_artifacts",
+        "teams",
+        "team_members",
     }.issubset(tables)
-    assert version == 4
+    assert version == 5
     assert journal_mode == "wal"
     assert foreign_keys == 1
 
 
 def test_newer_database_version_is_rejected(tmp_path: Path) -> None:
     database = Database(tmp_path / "future.db")
-    assert database.initialize() == 4
+    assert database.initialize() == 5
     with database.transaction(immediate=True) as connection:
         connection.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) VALUES (99, 'future', 'now')"
@@ -170,6 +173,35 @@ def test_session_store_upsert_and_invalid_json_fallback(database: Database) -> N
             "UPDATE sessions SET metadata_json = 'not-json' WHERE id = 'session-1'"
         )
     assert store.get("session-1").metadata == {}
+
+
+def test_team_store_persists_member_runtime_state(database: Database) -> None:
+    store = TeamStore(database)
+    team = store.upsert_team(
+        "team-a", "lead", description="build", backend_type="in-process"
+    )
+    member = type(
+        "Member",
+        (),
+        {
+            "agent_id": "agent-1",
+            "name": "worker",
+            "agent_type": "general",
+            "model": "test",
+            "worktree_path": "C:/worktree",
+            "backend_type": "in-process",
+            "is_active": True,
+        },
+    )()
+    running = store.upsert_member(team.name, member)
+    store.set_member_active(team.name, member.name, False)
+
+    idle = store.list_members(team.name)[0]
+    assert running.status == "running"
+    assert idle.status == "idle" and idle.is_active is False
+    store.mark_deleted(team.name)
+    assert store.get_team(team.name).status == "deleted"
+    assert store.list_members(team.name)[0].status == "stopped"
 
 
 def test_run_step_and_tool_call_lifecycle_is_queryable(database: Database) -> None:

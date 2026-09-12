@@ -255,11 +255,53 @@ def _migration_004_result_artifacts(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_005_team_state(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE teams (
+            name TEXT PRIMARY KEY,
+            lead_agent_id TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            backend_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK (status IN ('active', 'deleted')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE team_members (
+            team_name TEXT NOT NULL REFERENCES teams(name) ON DELETE CASCADE,
+            agent_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            agent_type TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            worktree_path TEXT NOT NULL DEFAULT '',
+            backend_type TEXT NOT NULL DEFAULT '',
+            is_active INTEGER CHECK (is_active IN (0, 1) OR is_active IS NULL),
+            status TEXT NOT NULL CHECK (
+                status IN ('starting', 'running', 'idle', 'stopped')
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (team_name, agent_id),
+            UNIQUE (team_name, name)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_team_members_status ON team_members(team_name, status)"
+    )
+
+
 MIGRATIONS = (
     Migration(1, "initial_control_plane", _migration_001_initial_control_plane),
     Migration(2, "task_dependencies", _migration_002_task_dependencies),
     Migration(3, "compact_checkpoints", _migration_003_compact_checkpoints),
     Migration(4, "result_artifacts", _migration_004_result_artifacts),
+    Migration(5, "team_state", _migration_005_team_state),
 )
 
 

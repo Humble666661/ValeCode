@@ -24,6 +24,7 @@ from valecode.persistence.result_artifact_store import (
 )
 from valecode.persistence.session_store import SessionStore
 from valecode.persistence.task_store import TaskStore
+from valecode.persistence.team_store import TeamMemberState, TeamState, TeamStore
 
 __all__ = [
     "Database",
@@ -45,6 +46,9 @@ __all__ = [
     "TaskState",
     "TaskStatus",
     "TaskStore",
+    "TeamMemberState",
+    "TeamState",
+    "TeamStore",
     "ToolCallState",
     "ToolCallStatus",
 ]

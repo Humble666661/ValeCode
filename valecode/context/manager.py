@@ -5,6 +5,7 @@ import os
 import shutil
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,6 +17,7 @@ from valecode.conversation import (
     estimate_tokens,
 )
 from valecode.serialization import build_messages
+from valecode.path_utils import platform_path
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -92,6 +94,18 @@ class ContentReplacementRecord:
     kind: str = "tool-result"
 
 
+@dataclass
+class ToolResultBudgetApplication:
+    """Immutable API view plus newly persisted replacement records."""
+
+    conversation: ConversationManager
+    records: list[ContentReplacementRecord]
+
+    def __iter__(self):
+        yield self.conversation
+        yield self.records
+
+
 def create_replacement_state() -> ContentReplacementState:
     return ContentReplacementState()
 
@@ -166,7 +180,7 @@ def reconstruct_replacement_state(
 # ---------------------------------------------------------------------------
 
 def ensure_session_dir(work_dir: str) -> Path:
-    session_dir = Path(work_dir) / SESSION_SUBDIR
+    session_dir = platform_path(work_dir) / SESSION_SUBDIR
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
 
@@ -223,26 +237,27 @@ def apply_tool_result_budget(
     conversation: ConversationManager,
     session_dir: Path,
     state: ContentReplacementState,
-) -> list[ContentReplacementRecord]:
+) -> ToolResultBudgetApplication:
     """
-    Design A: 就地修改原始对话历史（匹配 Claude Code 实现）。
+    Design B: 基于原始对话构造仅用于模型请求的预算视图。
 
-    直接修改 conversation.history 中消息的 ToolResultBlock.content，
-    对超限的 tool result 替换为落盘预览文本。
+    原始 conversation 保持不变；对超限的 tool result 只在返回的
+    API conversation 中替换为落盘预览文本。
 
     state 会被 mutate：本轮新决定的 id 进入 seen_ids，新决定替换的 id 进入 replacements。
 
-    返回本轮新产生的替换记录列表（List[ContentReplacementRecord]）。
+    返回 API conversation 和本轮新产生的替换记录。
     """
+    api_conversation = deepcopy(conversation)
     new_records: list[ContentReplacementRecord] = []
 
     abs_spill_dir = os.path.abspath(str(session_dir))
     tool_use_index: dict = {}
-    for msg in conversation.history:
+    for msg in api_conversation.history:
         for tu in msg.tool_uses:
             tool_use_index[tu.tool_use_id] = tu
 
-    for msg in conversation.history:
+    for msg in api_conversation.history:
         if not msg.tool_results:
             continue
 
@@ -317,7 +332,7 @@ def apply_tool_result_budget(
             if tr.tool_use_id not in state.replacements:
                 state.seen_ids.add(tr.tool_use_id)
 
-    return new_records
+    return ToolResultBudgetApplication(api_conversation, new_records)
 
 
 # ---------------------------------------------------------------------------

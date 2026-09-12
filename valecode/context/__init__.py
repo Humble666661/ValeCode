@@ -6,6 +6,7 @@ from valecode.context.manager import (
     CompactEvent,
     ContentReplacementRecord,
     ContentReplacementState,
+    ToolResultBudgetApplication,
     FileReadRecord,
     REPLACEMENT_RECORDS_FILENAME,
     RecoveryState,
@@ -32,6 +33,7 @@ __all__ = [
     "CompactEvent",
     "ContentReplacementRecord",
     "ContentReplacementState",
+    "ToolResultBudgetApplication",
     "FileReadRecord",
     "REPLACEMENT_RECORDS_FILENAME",
     "RecoveryState",
@@ -50,4 +52,3 @@ __all__ = [
     "load_replacement_records",
     "reconstruct_replacement_state",
 ]
-

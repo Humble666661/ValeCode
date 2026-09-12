@@ -12,6 +12,7 @@ from valecode.teams.models import (
     BackendType,
     TeammateInfo,
     resolve_team_dir,
+    use_fallback_team_root,
     unique_team_name,
 )
 from valecode.teams.progress import TeammateProgress
@@ -68,7 +69,11 @@ class TeamManager:
         backend = self.detect_backend(teammate_mode, is_interactive)
         slug = unique_team_name(name)
         team_dir = resolve_team_dir(slug)
-        team_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            team_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            team_dir = use_fallback_team_root() / slug
+            team_dir.mkdir(parents=True, exist_ok=True)
 
         config_path = str(team_dir / "config.json")
         team = AgentTeam(

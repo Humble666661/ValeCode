@@ -96,10 +96,11 @@ class TestApplyToolResultBudget:
         )
         state = create_replacement_state()
 
-        records = apply_tool_result_budget(conv, tmp_path, state)
+        api_conv, records = apply_tool_result_budget(conv, tmp_path, state)
 
-        # Design A：就地修改原始对话历史
-        tr = conv.history[0].tool_results[0]
+        # Design B：原始历史不变，只有 API 视图使用落盘预览。
+        assert conv.history[0].tool_results[0].content == big_content
+        tr = api_conv.history[0].tool_results[0]
         assert tr.content.startswith(PERSISTED_TAG)
         assert (tmp_path / "toolu_big.txt").exists()
         assert len(records) == 1 and records[0].tool_use_id == "toolu_big"
@@ -118,11 +119,12 @@ class TestApplyToolResultBudget:
         )
         state = create_replacement_state()
 
-        records = apply_tool_result_budget(conv, tmp_path, state)
+        api_conv, records = apply_tool_result_budget(conv, tmp_path, state)
 
         # 未超限：内容保持不变（就地未修改）
         tr = conv.history[0].tool_results[0]
         assert tr.content == small_content
+        assert api_conv.history[0].tool_results[0].content == small_content
         assert not (tmp_path / "toolu_sm.txt").exists()
         assert records == []
         assert "toolu_sm" in state.seen_ids
@@ -141,10 +143,10 @@ class TestApplyToolResultBudget:
         conv.history.append(Message(role="user", content="", tool_results=results))
         state = create_replacement_state()
 
-        apply_tool_result_budget(conv, tmp_path, state)
+        api_conv, _ = apply_tool_result_budget(conv, tmp_path, state)
 
-        # Design A：就地修改，直接检查原始 conversation
-        total = sum(len(tr.content) for tr in conv.history[0].tool_results)
+        # Design B：预算仅应用到 API conversation。
+        total = sum(len(tr.content) for tr in api_conv.history[0].tool_results)
         assert total <= AGGREGATE_CHAR_LIMIT
 
     def test_already_persisted_skipped(self, tmp_path: Path) -> None:

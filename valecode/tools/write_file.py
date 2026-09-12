@@ -1,12 +1,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from valecode.tools.base import Tool, ToolResult
+from valecode.path_utils import platform_path
 
 if TYPE_CHECKING:
     from valecode.cache import FileCache
@@ -38,7 +38,7 @@ class WriteFile(Tool):
         if self.file_history is not None:
             self.file_history.track_edit(params.file_path)
 
-        path = Path(params.file_path)
+        path = platform_path(params.file_path)
 
         if self._state_cache and path.exists():
             resolved = str(path.resolve())

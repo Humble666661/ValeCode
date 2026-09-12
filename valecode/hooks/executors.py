@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
+import subprocess
+import sys
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
@@ -12,9 +16,20 @@ log = logging.getLogger(__name__)
 
 async def execute_command(action: Action, ctx: HookContext) -> ActionResult:
     command = ctx.expand(action.command)
+    executable_command = command
+    if os.name == "nt":
+        sleep_match = re.fullmatch(r"\s*sleep\s+(\d+(?:\.\d+)?)\s*", command)
+        if sleep_match:
+            executable_command = subprocess.list2cmdline(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import time; time.sleep({float(sleep_match.group(1))})",
+                ]
+            )
     try:
         proc = await asyncio.create_subprocess_shell(
-            command,
+            executable_command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

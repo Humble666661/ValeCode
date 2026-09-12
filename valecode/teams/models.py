@@ -1,13 +1,40 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 from valecode.teams.progress import TeammateProgress
+
+
+_team_root_override: Path | None = None
+_team_root_override_home: Path | None = None
+
+
+def _team_root() -> Path:
+    current_home = Path.home()
+    if (
+        _team_root_override is not None
+        and _team_root_override_home == current_home
+    ):
+        return _team_root_override
+    configured = os.environ.get("VALECODE_STATE_DIR", "").strip()
+    state_root = Path(configured).expanduser() if configured else current_home / ".valecode"
+    return state_root / "teams"
+
+
+def use_fallback_team_root() -> Path:
+    """Switch team state to a writable fallback after a home access failure."""
+
+    global _team_root_override, _team_root_override_home
+    _team_root_override_home = Path.home()
+    _team_root_override = Path(tempfile.gettempdir()) / "valecode" / "teams"
+    return _team_root_override
 
 
 class BackendType(str, Enum):
@@ -126,12 +153,12 @@ class AgentTeam:
 
 def resolve_team_dir(team_name: str) -> Path:
     slug = _sanitize_name(team_name)
-    return Path.home() / ".valecode" / "teams" / slug
+    return _team_root() / slug
 
 
 def unique_team_name(team_name: str) -> str:
     slug = _sanitize_name(team_name)
-    base_dir = Path.home() / ".valecode" / "teams"
+    base_dir = _team_root()
     if not (base_dir / slug).exists():
         return slug
     counter = 2

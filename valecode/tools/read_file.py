@@ -1,12 +1,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from valecode.tools.base import Tool, ToolResult
+from valecode.path_utils import platform_path
 
 if TYPE_CHECKING:
     from valecode.cache import FileCache
@@ -33,7 +33,7 @@ class ReadFile(Tool):
 
 
     async def execute(self, params: Params) -> ToolResult:
-        path = Path(params.file_path)
+        path = platform_path(params.file_path)
         if not path.exists():
             return ToolResult(output=f"Error: file not found: {params.file_path}", is_error=True)
         if not path.is_file():

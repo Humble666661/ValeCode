@@ -1104,38 +1104,40 @@ class Agent:
 
             tools = self.registry.get_all_schemas(self.protocol)
 
-            # Layer 1: apply tool-result budget（就地修改 conversation）
-            new_records = apply_tool_result_budget(
+            # Layer 1: build an immutable, budgeted API view.
+            api_conversation, new_records = apply_tool_result_budget(
                 conversation, self.session_dir, self.replacement_state
             )
             if new_records:
                 append_replacement_records(self.session_dir, new_records)
 
-            # Layer 2: 接近 context window 上限时自动 compact
-            # tool-result budget 已就地修改 conversation，直接用 conversation.history 估算
-            compact_result = await self._auto_compact_with_trace(conversation)
+            # Layer 2: compact the budgeted view. Only a successful compaction
+            # replaces the durable conversation; otherwise raw results remain intact.
+            compact_result = await self._auto_compact_with_trace(api_conversation)
             if isinstance(compact_result, CompactEvent):
                 yield CompactNotification(
                     before_tokens=compact_result.before_tokens,
                     message=f"上下文已压缩（压缩前 {compact_result.before_tokens:,} tokens）",
                     boundary=compact_result.boundary,
                 )
+                conversation.replace_history(api_conversation.get_messages())
                 conversation.inject_environment(env_context)
                 mem = self.memory_manager.load() if self.memory_manager else ""
                 conversation.inject_long_term_memory(
                     self.instructions_content, mem
                 )
-                # 压缩后重新应用 budget（就地修改）
-                apply_tool_result_budget(
+                api_conversation, compact_records = apply_tool_result_budget(
                     conversation, self.session_dir, self.replacement_state
                 )
+                if compact_records:
+                    append_replacement_records(self.session_dir, compact_records)
             elif isinstance(compact_result, str):
                 yield ErrorEvent(message=compact_result)
 
             self._start_control_step(iteration)
             collector = StreamCollector()
             async for event in self._consume_llm_stream(
-                collector, conversation, system, tools
+                collector, api_conversation, system, tools
             ):
                 yield event
 
@@ -1916,15 +1918,16 @@ class Agent:
                 for note in self.notification_fn():
                     conversation.add_system_reminder(note)
 
-            # 对齐 Claude Code：先应用 tool-result budget（就地修改），再做 auto-compact
-            pre_compact_records = apply_tool_result_budget(
+            # Build a model-only budget view without mutating durable history.
+            api_conversation, pre_compact_records = apply_tool_result_budget(
                 conversation, self.session_dir, self.replacement_state
             )
             if pre_compact_records:
                 append_replacement_records(self.session_dir, pre_compact_records)
 
-            compact_result = await self._auto_compact_with_trace(conversation)
+            compact_result = await self._auto_compact_with_trace(api_conversation)
             if isinstance(compact_result, CompactEvent):
+                conversation.replace_history(api_conversation.get_messages())
                 conversation.inject_environment(env_context)
 
             deferred_names = self.registry.get_deferred_tool_names()
@@ -1936,8 +1939,8 @@ class Agent:
                     + "\n".join(deferred_names)
                 )
 
-            # 压缩后或追加 deferred 提示后重新应用 budget（就地修改）
-            _new_records = apply_tool_result_budget(
+            # Rebuild after compaction or deferred-tool reminders.
+            api_conversation, _new_records = apply_tool_result_budget(
                 conversation, self.session_dir, self.replacement_state
             )
             if _new_records:
@@ -1946,7 +1949,7 @@ class Agent:
             self._start_control_step(iteration)
             collector = StreamCollector()
             async for _event in self._consume_llm_stream(
-                collector, conversation, system, tools
+                collector, api_conversation, system, tools
             ):
                 pass
 

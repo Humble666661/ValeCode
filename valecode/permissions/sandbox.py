@@ -4,6 +4,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from valecode.path_utils import platform_path
+
 
 class PathSandbox:
 
@@ -60,7 +62,7 @@ class PathSandbox:
 
 
     def check(self, path: str) -> tuple[bool, str]:
-        p = Path(path).expanduser()
+        p = platform_path(path).expanduser()
         if not p.is_absolute():
             p = self.project_root / p
         abs_path = p.absolute()
@@ -69,7 +71,13 @@ class PathSandbox:
             real_path = abs_path.resolve(strict=True)
         except OSError:
             ancestor = abs_path
-            while not ancestor.exists():
+            while True:
+                try:
+                    exists = ancestor.exists()
+                except OSError:
+                    return False, f"无法解析路径: {path}"
+                if exists:
+                    break
                 parent = ancestor.parent
                 if parent == ancestor:
                     return False, f"无法解析路径: {path}"

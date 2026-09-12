@@ -55,6 +55,13 @@ class TestPersistToolResult:
         fp = tmp_path / "toolu_002.txt"
         assert fp.read_text() == "first"
 
+    def test_tool_id_cannot_escape_result_directory(self, tmp_path: Path) -> None:
+        fp = persist_tool_result("../../outside", "safe", tmp_path / "results")
+
+        assert fp.parent == tmp_path / "results"
+        assert fp.read_text(encoding="utf-8") == "safe"
+        assert not (tmp_path / "outside.txt").exists()
+
 # ---------------------------------------------------------------------------
 # make_persisted_preview
 # ---------------------------------------------------------------------------
@@ -282,6 +289,15 @@ class TestSessionDir:
         cleanup_tool_results(session_dir)
         assert session_dir.exists()
         assert len(list(session_dir.iterdir())) == 0
+
+    def test_cleanup_retains_referenced_result(self, tmp_path: Path) -> None:
+        keep = persist_tool_result("keep", "kept", tmp_path)
+        drop = persist_tool_result("drop", "removed", tmp_path)
+
+        cleanup_tool_results(tmp_path, {"keep"})
+
+        assert keep.exists()
+        assert not drop.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -685,9 +701,16 @@ class TestAutoCompactKeepRecent:
         kept_before = list(conv.history[keep_start:])
         client = _SummaryClient()
         conv.record_usage_anchor(input_tokens=200_000)
+        cleanup_calls: list[tuple[list[Message], str]] = []
 
         result = await auto_compact(
-            conv, client, context_window=200_000, session_dir=tmp_path,
+            conv,
+            client,
+            context_window=200_000,
+            session_dir=tmp_path,
+            cleanup_callback=lambda messages, checkpoint_id: cleanup_calls.append(
+                (messages, checkpoint_id)
+            ),
         )
 
         from valecode.context.manager import CompactEvent
@@ -698,6 +721,8 @@ class TestAutoCompactKeepRecent:
         # 保留的尾部与原样沿用下来的内容完全一致。
         assert result.boundary.keep == kept_before
         assert result.boundary.tail_id == message_tail_id(kept_before)
+        assert result.boundary.checkpoint_id.startswith("checkpoint_")
+        assert cleanup_calls == [(kept_before, result.boundary.checkpoint_id)]
 
     async def test_event_carries_recovery_attachment_and_transcript(
         self, tmp_path: Path

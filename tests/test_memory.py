@@ -674,6 +674,26 @@ class TestSessionMeta:
         path.write_text("not json", encoding="utf-8")
         assert SessionMeta.load(path) is None
 
+
+def test_session_delete_reclaims_indexed_result_artifacts(tmp_path: Path) -> None:
+    mgr = SessionManager(str(tmp_path))
+    session = mgr.create()
+    session_id = session.session_id
+    artifact_root = tmp_path / ".valecode" / "session" / "tool-results"
+    artifact_root.mkdir(parents=True)
+    result_path = artifact_root / "large.txt"
+    result_path.write_text("large result", encoding="utf-8")
+    artifact = mgr.result_artifact_store.register(
+        result_path,
+        tool_use_id="tool-large",
+        session_id=session_id,
+    )
+    session.close()
+
+    assert mgr.delete(session_id) is True
+    assert not result_path.exists()
+    assert mgr.result_artifact_store.get(artifact.id) is None
+
 # =========================================================================
 # G. 记忆管理器 MemoryManager
 # =========================================================================

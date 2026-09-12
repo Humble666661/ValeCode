@@ -221,10 +221,45 @@ def _migration_003_compact_checkpoints(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_004_result_artifacts(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE result_artifacts (
+            id TEXT PRIMARY KEY,
+            session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+            run_id TEXT,
+            step_id TEXT,
+            tool_call_id TEXT,
+            tool_use_id TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+            state TEXT NOT NULL CHECK (
+                state IN ('active', 'released', 'deleted', 'missing')
+            ),
+            checkpoint_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX idx_result_artifacts_session_state ON result_artifacts(session_id, state)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_result_artifacts_run ON result_artifacts(run_id) WHERE run_id IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE INDEX idx_result_artifacts_tool_use ON result_artifacts(tool_use_id)"
+    )
+
+
 MIGRATIONS = (
     Migration(1, "initial_control_plane", _migration_001_initial_control_plane),
     Migration(2, "task_dependencies", _migration_002_task_dependencies),
     Migration(3, "compact_checkpoints", _migration_003_compact_checkpoints),
+    Migration(4, "result_artifacts", _migration_004_result_artifacts),
 )
 
 

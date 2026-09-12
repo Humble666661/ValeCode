@@ -24,6 +24,7 @@ from valecode.persistence import (
     CheckpointStore,
     Database,
     RunStore,
+    ResultArtifactStore,
     SessionStore,
     TaskStore,
 )
@@ -642,6 +643,7 @@ class SessionManager:
         self.database.initialize()
         self.session_store = SessionStore(self.database)
         self.checkpoint_store = CheckpointStore(self.database)
+        self.result_artifact_store = ResultArtifactStore(self.database)
         self.run_store = RunStore(self.database)
         self.task_store = TaskStore(self.database)
         self.recovered_tasks = self.task_store.recover_expired_leases()
@@ -803,6 +805,12 @@ class SessionManager:
         meta_path = self._sessions_dir / f"{session_id}.meta"
 
         deleted = False
+        artifact_root = self._sessions_dir.parent / "session" / "tool-results"
+        artifacts = self.result_artifact_store.list_for_session(session_id)
+        if artifacts:
+            self.result_artifact_store.reconcile_references(
+                session_id, set(), root_dir=artifact_root
+            )
         if jsonl_path.exists():
             jsonl_path.unlink()
             deleted = True

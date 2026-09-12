@@ -12,6 +12,7 @@ from valecode.persistence import (
     InvalidTransitionError,
     RunStatus,
     RunStore,
+    ResultArtifactStore,
     SessionStore,
     StepStatus,
     TaskStatus,
@@ -24,12 +25,12 @@ from valecode.persistence.migrations import MigrationError
 @pytest.fixture
 def database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "control.db")
-    assert database.initialize() == 3
+    assert database.initialize() == 4
     return database
 
 
 def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
-    assert database.initialize() == 3
+    assert database.initialize() == 4
     with database.reader() as connection:
         tables = {
             row["name"]
@@ -52,15 +53,16 @@ def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
         "task_dependencies",
         "run_events",
         "checkpoints",
+        "result_artifacts",
     }.issubset(tables)
-    assert version == 3
+    assert version == 4
     assert journal_mode == "wal"
     assert foreign_keys == 1
 
 
 def test_newer_database_version_is_rejected(tmp_path: Path) -> None:
     database = Database(tmp_path / "future.db")
-    assert database.initialize() == 3
+    assert database.initialize() == 4
     with database.transaction(immediate=True) as connection:
         connection.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) VALUES (99, 'future', 'now')"
@@ -89,6 +91,59 @@ def test_checkpoint_store_indexes_transcript_boundary(database: Database) -> Non
     assert checkpoint.transcript_offset == 42
     assert store.get("checkpoint-1") == checkpoint
     assert store.list_for_session("session-1") == [checkpoint]
+
+
+def test_result_artifact_store_tracks_hash_references_and_cleanup(
+    database: Database, tmp_path: Path
+) -> None:
+    SessionStore(database).upsert("session-1")
+    root = tmp_path / "tool-results"
+    root.mkdir()
+    keep_path = root / "keep.txt"
+    drop_path = root / "drop.txt"
+    keep_path.write_text("keep", encoding="utf-8")
+    drop_path.write_text("drop", encoding="utf-8")
+    store = ResultArtifactStore(database)
+    kept = store.register(
+        keep_path, tool_use_id="tool-keep", session_id="session-1"
+    )
+    dropped = store.register(
+        drop_path, tool_use_id="tool-drop", session_id="session-1"
+    )
+
+    states = store.reconcile_references(
+        "session-1",
+        {"tool-keep"},
+        root_dir=root,
+        checkpoint_id="checkpoint-1",
+    )
+    by_id = {state.id: state for state in states}
+
+    assert len(kept.sha256) == 64 and kept.size_bytes == 4
+    assert by_id[kept.id].state == "active"
+    assert by_id[kept.id].checkpoint_id == "checkpoint-1"
+    assert keep_path.exists()
+    assert by_id[dropped.id].state == "deleted"
+    assert not drop_path.exists()
+
+
+def test_result_artifact_cleanup_refuses_paths_outside_root(
+    database: Database, tmp_path: Path
+) -> None:
+    SessionStore(database).upsert("session-1")
+    root = tmp_path / "tool-results"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("do not delete", encoding="utf-8")
+    store = ResultArtifactStore(database)
+    artifact = store.register(
+        outside, tool_use_id="tool-outside", session_id="session-1"
+    )
+
+    store.reconcile_references("session-1", set(), root_dir=root)
+
+    assert outside.exists()
+    assert store.get(artifact.id).state == "released"
 
 
 def test_session_store_upsert_and_invalid_json_fallback(database: Database) -> None:

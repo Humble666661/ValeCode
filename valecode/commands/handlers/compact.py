@@ -33,6 +33,7 @@ async def handle_compact(ctx: CommandContext) -> None:
                     tail_id=result.boundary.tail_id,
                     attachment=result.boundary.attachment,
                     transcript_path=result.boundary.transcript_path,
+                    checkpoint_id=result.boundary.checkpoint_id,
                     run_id=result.run_id,
                     step_id=result.step_id,
                 )

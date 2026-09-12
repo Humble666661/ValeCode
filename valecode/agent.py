@@ -37,6 +37,7 @@ from valecode.permissions import (
     PermissionMode,
 )
 from valecode.persistence import (
+    ResultArtifactStore,
     RunStatus,
     RunStore,
     StepStatus,
@@ -391,6 +392,12 @@ class Agent:
         self.memory_manager = memory_manager
         self.hook_engine = hook_engine
         self.run_store = run_store
+        run_database = getattr(run_store, "database", None)
+        self.result_artifact_store = (
+            ResultArtifactStore(run_database) if run_database is not None else None
+        )
+        self._persisted_result_paths: dict[str, str] = {}
+        self._artifact_sweep_session_id: str | None = None
         self.provider_name = provider_name
         self.model = model
         self.tracing = tracing or get_tracing()
@@ -559,6 +566,25 @@ class Agent:
         self._current_step_id = None
         self._control_tool_ids = {}
         self.loop_guard.reset()
+        if (
+            self._artifact_sweep_session_id != self.session_id
+            and self.result_artifact_store is not None
+            and self.session_id
+        ):
+            try:
+                self.result_artifact_store.sweep_released(
+                    root_dir=self.session_dir, session_id=self.session_id
+                )
+                self._persisted_result_paths = {
+                    state.tool_use_id: state.path
+                    for state in self.result_artifact_store.list_for_session(
+                        self.session_id
+                    )
+                    if state.state == "active"
+                }
+                self._artifact_sweep_session_id = self.session_id
+            except Exception:
+                log.exception("Failed to sweep released tool-result artifacts")
         if self.run_store is None or not self.session_id:
             # Standalone/test agents still need a stable request trace so any
             # Sub-Agent launched during this run can join the same trace.
@@ -744,6 +770,7 @@ class Agent:
             if call.result_path:
                 try:
                     output = Path(call.result_path).read_text(encoding="utf-8")
+                    self._persisted_result_paths[provider_tool_id] = call.result_path
                 except OSError:
                     pass
             if not output and isinstance(call.result, dict):
@@ -816,7 +843,69 @@ class Agent:
 
         if len(raw_output) <= SINGLE_RESULT_CHAR_LIMIT:
             return None
-        return str(self.session_dir / "tool-results" / f"{provider_tool_id}.txt")
+        return self._persisted_result_paths.get(provider_tool_id)
+
+    @staticmethod
+    def _artifact_scope(value: str) -> str:
+        return uuid.uuid5(uuid.NAMESPACE_URL, value or "unbound").hex[:16]
+
+    def _persist_tool_result(
+        self, tool_use_id: str, content: str, _session_dir: Path
+    ) -> Path:
+        from valecode.context.manager import persist_tool_result
+
+        scoped_dir = (
+            self.session_dir
+            / self._artifact_scope(self.session_id or self.agent_id)
+            / self._artifact_scope(self._current_run_id or "unbound")
+        )
+        path = persist_tool_result(tool_use_id, content, scoped_dir)
+        self._persisted_result_paths[tool_use_id] = str(path)
+        if self.result_artifact_store is not None:
+            try:
+                self.result_artifact_store.register(
+                    path,
+                    tool_use_id=tool_use_id,
+                    session_id=self.session_id or None,
+                    run_id=self._current_run_id,
+                    step_id=self._current_step_id,
+                    tool_call_id=self._control_tool_ids.get(tool_use_id),
+                )
+            except Exception:
+                log.exception("Failed to index tool-result artifact %s", path)
+        return path
+
+    def _cleanup_result_artifacts(
+        self, messages: list[Any], checkpoint_id: str
+    ) -> None:
+        from valecode.context.manager import PERSISTED_TAG
+
+        referenced_tool_use_ids: set[str] = set()
+        referenced_paths: set[str] = set()
+        for message in messages:
+            for result in message.tool_results:
+                referenced_tool_use_ids.add(result.tool_use_id)
+                lines = result.content.splitlines()
+                if lines and lines[0] == PERSISTED_TAG and len(lines) > 2:
+                    referenced_paths.add(lines[2].strip())
+        if self.result_artifact_store is None or not self.session_id:
+            from valecode.context.manager import cleanup_tool_results
+
+            cleanup_tool_results(self.session_dir, referenced_tool_use_ids)
+            return
+        states = self.result_artifact_store.reconcile_references(
+            self.session_id,
+            referenced_tool_use_ids,
+            root_dir=self.session_dir,
+            checkpoint_id=checkpoint_id,
+            referenced_paths=referenced_paths,
+        )
+        active_paths = {
+            state.tool_use_id: state.path
+            for state in states
+            if state.state == "active"
+        }
+        self._persisted_result_paths = active_paths
 
     def _trace_attributes(self) -> dict[str, Any]:
         return {
@@ -1063,6 +1152,7 @@ class Agent:
                 recovery=self.recovery_state,
                 tool_schemas=self.registry.get_all_schemas(self.protocol),
                 transcript_path=self._transcript_path,
+                cleanup_callback=self._cleanup_result_artifacts,
             )
             span.set_attributes(
                 {
@@ -1231,7 +1321,10 @@ class Agent:
 
             # Layer 1: build an immutable, budgeted API view.
             api_conversation, new_records = apply_tool_result_budget(
-                conversation, self.session_dir, self.replacement_state
+                conversation,
+                self.session_dir,
+                self.replacement_state,
+                persist_callback=self._persist_tool_result,
             )
             if new_records:
                 append_replacement_records(self.session_dir, new_records)
@@ -1252,7 +1345,10 @@ class Agent:
                     self.instructions_content, mem
                 )
                 api_conversation, compact_records = apply_tool_result_budget(
-                    conversation, self.session_dir, self.replacement_state
+                    conversation,
+                    self.session_dir,
+                    self.replacement_state,
+                    persist_callback=self._persist_tool_result,
                 )
                 if compact_records:
                     append_replacement_records(self.session_dir, compact_records)
@@ -2084,7 +2180,10 @@ class Agent:
 
             # Build a model-only budget view without mutating durable history.
             api_conversation, pre_compact_records = apply_tool_result_budget(
-                conversation, self.session_dir, self.replacement_state
+                conversation,
+                self.session_dir,
+                self.replacement_state,
+                persist_callback=self._persist_tool_result,
             )
             if pre_compact_records:
                 append_replacement_records(self.session_dir, pre_compact_records)
@@ -2105,7 +2204,10 @@ class Agent:
 
             # Rebuild after compaction or deferred-tool reminders.
             api_conversation, _new_records = apply_tool_result_budget(
-                conversation, self.session_dir, self.replacement_state
+                conversation,
+                self.session_dir,
+                self.replacement_state,
+                persist_callback=self._persist_tool_result,
             )
             if _new_records:
                 append_replacement_records(self.session_dir, _new_records)
@@ -2355,11 +2457,10 @@ class Agent:
         from valecode.context.manager import (
             SINGLE_RESULT_CHAR_LIMIT,
             make_persisted_preview,
-            persist_tool_result,
         )
 
         if len(text) > SINGLE_RESULT_CHAR_LIMIT:
-            fp = persist_tool_result(tool_use_id, text, self.session_dir)
+            fp = self._persist_tool_result(tool_use_id, text, self.session_dir)
             return make_persisted_preview(text, fp)
         registration = (
             self.registry.get_registration(tool_name) if tool_name is not None else None

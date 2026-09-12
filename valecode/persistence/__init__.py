@@ -18,6 +18,10 @@ from valecode.persistence.models import (
     ToolCallStatus,
 )
 from valecode.persistence.run_store import RunStore
+from valecode.persistence.result_artifact_store import (
+    ResultArtifactState,
+    ResultArtifactStore,
+)
 from valecode.persistence.session_store import SessionStore
 from valecode.persistence.task_store import TaskStore
 
@@ -31,6 +35,8 @@ __all__ = [
     "RunState",
     "RunStatus",
     "RunStore",
+    "ResultArtifactState",
+    "ResultArtifactStore",
     "SessionState",
     "SessionStore",
     "StepState",

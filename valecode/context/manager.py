@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-import shutil
+import re
 import threading
 import time
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from valecode.conversation import (
     ConversationManager,
@@ -19,6 +21,8 @@ from valecode.conversation import (
 )
 from valecode.serialization import build_messages
 from valecode.path_utils import platform_path
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -71,6 +75,7 @@ class CompactBoundary:
     tail_id: str = ""
     attachment: str = ""
     transcript_path: str = ""
+    checkpoint_id: str = ""
 
 
 @dataclass
@@ -189,18 +194,47 @@ def ensure_session_dir(work_dir: str) -> Path:
     return session_dir
 
 
-def cleanup_tool_results(session_dir: Path) -> None:
-    if session_dir.exists():
-        shutil.rmtree(session_dir)
-        session_dir.mkdir(parents=True, exist_ok=True)
+def cleanup_tool_results(
+    session_dir: Path, referenced_tool_use_ids: set[str] | None = None
+) -> None:
+    """Delete unreferenced spill files without removing shared state files."""
+    if not session_dir.exists():
+        return
+    referenced_names = {
+        _safe_tool_result_name(tool_use_id)
+        for tool_use_id in (referenced_tool_use_ids or set())
+    }
+    for path in session_dir.rglob("*.txt"):
+        if path.name not in referenced_names:
+            path.unlink(missing_ok=True)
+    # Remove empty per-session/run directories, never the shared root.
+    for path in sorted(
+        (item for item in session_dir.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
 # Layer 1：大型工具结果落盘
 # ---------------------------------------------------------------------------
 
+def _safe_tool_result_name(tool_use_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", tool_use_id).strip("._")
+    if safe and len(safe) <= 120:
+        return f"{safe}.txt"
+    import hashlib
+
+    return f"tool_{hashlib.sha256(tool_use_id.encode('utf-8')).hexdigest()}.txt"
+
+
 def persist_tool_result(tool_use_id: str, content: str, session_dir: Path) -> Path:
-    file_path = session_dir / f"{tool_use_id}.txt"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    file_path = session_dir / _safe_tool_result_name(tool_use_id)
     try:
         fd = os.open(str(file_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -241,6 +275,7 @@ def apply_tool_result_budget(
     conversation: ConversationManager,
     session_dir: Path,
     state: ContentReplacementState,
+    persist_callback: Callable[[str, str, Path], Path] | None = None,
 ) -> ToolResultBudgetApplication:
     """
     Design B: 基于原始对话构造仅用于模型请求的预算视图。
@@ -254,6 +289,7 @@ def apply_tool_result_budget(
     """
     api_conversation = deepcopy(conversation)
     new_records: list[ContentReplacementRecord] = []
+    persist = persist_callback or persist_tool_result
 
     abs_spill_dir = os.path.abspath(str(session_dir))
     tool_use_index: dict = {}
@@ -291,7 +327,7 @@ def apply_tool_result_budget(
                 if _is_spill_readback(tr.tool_use_id, tool_use_index, abs_spill_dir):
                     persisted_p1.add(tr.tool_use_id)
                     continue
-                fp = persist_tool_result(tr.tool_use_id, tr.content, session_dir)
+                fp = persist(tr.tool_use_id, tr.content, session_dir)
                 preview = make_persisted_preview(tr.content, fp)
                 state.replacements[tr.tool_use_id] = preview
                 state.seen_ids.add(tr.tool_use_id)
@@ -321,7 +357,7 @@ def apply_tool_result_budget(
                     break
                 if _is_spill_readback(tr.tool_use_id, tool_use_index, abs_spill_dir):
                     continue
-                fp = persist_tool_result(tr.tool_use_id, tr.content, session_dir)
+                fp = persist(tr.tool_use_id, tr.content, session_dir)
                 preview = make_persisted_preview(tr.content, fp)
                 state.replacements[tr.tool_use_id] = preview
                 state.seen_ids.add(tr.tool_use_id)
@@ -798,6 +834,7 @@ async def auto_compact(
     tool_schemas: list[Mapping[str, Any]] | None = None,
     transcript_path: str = "",
     budget_messages: list[Message] | None = None,
+    cleanup_callback: Callable[[list[Message], str], None] | None = None,
 ) -> CompactEvent | str | None:
     # 以真实 API 用量为锚点做阈值判断：current_tokens() 返回上次计费基准
     # （input + cache_read + cache_creation + output）加上锚点之后新增消息的
@@ -919,7 +956,19 @@ async def auto_compact(
     # 不清零会导致 current_tokens() 对增量的估算出错。
     # 下一次 API 响应会基于重建后的 history 重新锚定。
     conversation.replace_history(new_messages)
-    cleanup_tool_results(session_dir)
+    checkpoint_id = f"checkpoint_{uuid.uuid4().hex}"
+    referenced_tool_use_ids = {
+        result.tool_use_id for message in keep_tail for result in message.tool_results
+    }
+    try:
+        if cleanup_callback is not None:
+            cleanup_callback(list(keep_tail), checkpoint_id)
+        else:
+            cleanup_tool_results(session_dir, referenced_tool_use_ids)
+    except Exception:
+        # Cleanup is recoverable bookkeeping and must not discard a successful
+        # summary or make context compaction fail.
+        log.exception("Failed to reconcile compacted tool-result artifacts")
 
     if breaker is not None:
         breaker.record_success()
@@ -934,5 +983,6 @@ async def auto_compact(
             tail_id=message_tail_id(list(keep_tail)),
             attachment=attachment,
             transcript_path=transcript_path,
+            checkpoint_id=checkpoint_id,
         ),
     )

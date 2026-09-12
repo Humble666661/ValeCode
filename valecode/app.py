@@ -1055,6 +1055,7 @@ class VelaCodeApp(App):
             tail_id=notification.boundary.tail_id,
             attachment=notification.boundary.attachment,
             transcript_path=notification.boundary.transcript_path,
+            checkpoint_id=notification.boundary.checkpoint_id,
             run_id=notification.run_id,
             step_id=notification.step_id,
         )

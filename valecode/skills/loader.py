@@ -6,7 +6,12 @@ from pathlib import Path
 
 import yaml
 
-from valecode.skills.parser import SkillDef, SkillParseError, parse_skill_file
+from valecode.skills.parser import (
+    SkillDef,
+    SkillParseError,
+    parse_skill_file,
+    parse_skill_permissions,
+)
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +130,7 @@ class SkillLoader:
             mode=mode,
             model=meta.get("model"),
             context=meta.get("context", "full"),
+            permission_rules=parse_skill_permissions(meta, str(yaml_path)),
             source_path=prompt_md if prompt_md.is_file() else yaml_path,
             is_directory=True,
         )

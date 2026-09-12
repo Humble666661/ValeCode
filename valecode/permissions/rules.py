@@ -85,6 +85,32 @@ class RuleEngine:
         self._user_path = user_rules_path
         self._project_path = project_rules_path
         self._local_path = local_rules_path
+        self._scoped_rules: dict[str, list[Rule]] = {}
+
+    def bind_scope(self, scope_id: str, rules: list[Rule]) -> None:
+        self._scoped_rules[scope_id] = list(rules)
+
+    def release_scope(self, scope_id: str) -> None:
+        self._scoped_rules.pop(scope_id, None)
+
+    def evaluate_scoped(self, tool_name: str, content: str) -> Effect | None:
+        matched: list[Effect] = []
+        for rules in self._scoped_rules.values():
+            for rule in reversed(rules):
+                if rule.matches(tool_name, content):
+                    matched.append(rule.effect)
+                    break
+        for effect in ("deny", "ask", "allow"):
+            if effect in matched:
+                return effect  # type: ignore[return-value]
+        return None
+
+    def clone(self) -> RuleEngine:
+        cloned = RuleEngine(self._user_path, self._project_path, self._local_path)
+        cloned._scoped_rules = {
+            scope: list(rules) for scope, rules in self._scoped_rules.items()
+        }
+        return cloned
 
     def _load_tiers(self) -> list[list[Rule]]:
         tiers: list[list[Rule]] = []

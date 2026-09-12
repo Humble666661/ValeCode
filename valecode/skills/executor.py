@@ -31,7 +31,7 @@ class SkillExecutor:
 
     def execute_inline(self, skill: SkillDef, args: str) -> None:
         prompt = substitute_arguments(skill.prompt_body, args)
-        self.agent.activate_skill(skill.name, prompt)
+        self.agent.activate_skill(skill.name, prompt, skill.permission_rules)
         if getattr(self.agent, "recovery_state", None) is not None:
             self.agent.recovery_state.record_skill_invocation(skill.name, prompt)
 
@@ -64,8 +64,17 @@ class SkillExecutor:
             protocol=self.protocol,
             work_dir=self.agent.work_dir,
             max_iterations=self.agent.max_iterations,
-            permission_checker=None,
+            permission_checker=(
+                self.agent.permission_checker.clone()
+                if self.agent.permission_checker is not None
+                else None
+            ),
             context_window=self.agent.context_window,
+            execution_controller=self.agent.execution_controller,
+            cancellation_token=self.agent.cancellation_token,
+        )
+        fork_agent.activate_skill(
+            skill.name, prompt, skill.permission_rules
         )
 
         result_parts: list[str] = []

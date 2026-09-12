@@ -469,10 +469,24 @@ class Agent:
         if self.permission_checker:
             self.permission_checker.mode = mode
 
-    def activate_skill(self, name: str, prompt_body: str) -> None:
+    def activate_skill(
+        self,
+        name: str,
+        prompt_body: str,
+        permission_rules: dict[str, list[str]] | None = None,
+    ) -> None:
         self.active_skills[name] = prompt_body
+        checker = getattr(self, "permission_checker", None)
+        if checker:
+            checker.bind_skill_scope(
+                name, permission_rules or {}
+            )
 
     def clear_active_skills(self) -> None:
+        checker = getattr(self, "permission_checker", None)
+        if checker:
+            for name in self.active_skills:
+                checker.release_skill_scope(name)
         self.active_skills.clear()
 
     def set_skill_catalog(self, catalog: str) -> None:

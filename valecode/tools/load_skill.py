@@ -56,7 +56,9 @@ class LoadSkill(Tool):
                 is_error=True,
             )
 
-        self._agent.activate_skill(skill.name, skill.prompt_body)
+        self._agent.activate_skill(
+            skill.name, skill.prompt_body, skill.permission_rules
+        )
 
         header = f"# Skill: {skill.name}\n\n"
         return ToolResult(output=header + skill.prompt_body)

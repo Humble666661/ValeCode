@@ -123,6 +123,45 @@ class TestParseSkillFile:
         assert skill.mode == "fork"
         assert skill.context == "none"
 
+    def test_scoped_permission_rules(self, tmp_path: Path) -> None:
+        f = tmp_path / "guarded.md"
+        f.write_text(textwrap.dedent("""\
+            ---
+            name: guarded
+            description: Scoped access
+            permissions:
+              allow:
+                - WriteFile(src/**)
+              deny:
+                - Bash(rm *)
+            allowed-tools:
+              - ReadFile
+            ---
+            Follow the scoped policy.
+        """))
+
+        skill = parse_skill_file(f)
+        assert skill.permission_rules == {
+            "allow": ["WriteFile(src/**)", "ReadFile(*)"],
+            "deny": ["Bash(rm *)"],
+        }
+
+    def test_invalid_scoped_permission_rule(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad-permission.md"
+        f.write_text(textwrap.dedent("""\
+            ---
+            name: guarded
+            description: Scoped access
+            permissions:
+              allow:
+                - not-a-rule
+            ---
+            Body
+        """))
+
+        with pytest.raises(SkillParseError, match="expected ToolName"):
+            parse_skill_file(f)
+
 class TestSubstituteArguments:
     def test_with_args(self) -> None:
         result = substitute_arguments("Do $ARGUMENTS now", "something cool")
@@ -313,7 +352,7 @@ class TestLoadSkillTool:
         result = await tool.execute(LoadSkillParams(name="commit"))
         assert not result.is_error
         assert "# Skill: commit" in result.output and "Do commit" in result.output
-        agent.activate_skill.assert_called_once_with("commit", "Do commit")
+        agent.activate_skill.assert_called_once_with("commit", "Do commit", {})
 
     @pytest.mark.asyncio
     async def test_load_unknown_skill(self) -> None:
@@ -381,3 +420,93 @@ class TestAgentSkillIntegration:
 
         real_agent.clear_active_skills()
         assert len(real_agent.active_skills) == 0
+
+    def test_skill_permission_scope_activates_and_releases(self, tmp_path: Path) -> None:
+        from pydantic import BaseModel
+
+        from valecode.agent import Agent
+        from valecode.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+        from valecode.tools.base import Tool, ToolResult
+
+        class Params(BaseModel):
+            file_path: str
+
+        class ScopedWrite(Tool):
+            name = "WriteFile"
+            description = "write"
+            params_model = Params
+            category = "write"
+
+            async def execute(self, params):
+                return ToolResult("ok")
+
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(str(tmp_path)),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.DEFAULT,
+        )
+        agent = Agent.__new__(Agent)
+        agent.active_skills = {}
+        agent.permission_checker = checker
+        tool = ScopedWrite()
+        arguments = {"file_path": str(tmp_path / "allowed.txt")}
+
+        assert checker.check(tool, arguments).effect == "ask"
+        agent.activate_skill(
+            "writer",
+            "write files",
+            {"allow": ["WriteFile(*)"]},
+        )
+        assert checker.check(tool, arguments).effect == "allow"
+        assert "Skill 权限作用域" in checker.check(tool, arguments).reason
+
+        agent.clear_active_skills()
+        assert checker.check(tool, arguments).effect == "ask"
+
+    def test_deny_wins_across_active_skill_scopes(self, tmp_path: Path) -> None:
+        from pydantic import BaseModel
+
+        from valecode.agent import Agent
+        from valecode.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+        from valecode.tools.base import Tool, ToolResult
+
+        class Params(BaseModel):
+            file_path: str
+
+        class ScopedWrite(Tool):
+            name = "WriteFile"
+            description = "write"
+            params_model = Params
+            category = "write"
+
+            async def execute(self, params):
+                return ToolResult("ok")
+
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(str(tmp_path)),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.DEFAULT,
+        )
+        agent = Agent.__new__(Agent)
+        agent.active_skills = {}
+        agent.permission_checker = checker
+        arguments = {"file_path": str(tmp_path / "file.txt")}
+
+        agent.activate_skill("allowing", "", {"allow": ["WriteFile(*)"]})
+        agent.activate_skill("blocking", "", {"deny": ["WriteFile(*)"]})
+
+        assert checker.check(ScopedWrite(), arguments).effect == "deny"

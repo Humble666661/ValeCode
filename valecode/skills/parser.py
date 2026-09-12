@@ -13,6 +13,8 @@ log = logging.getLogger(__name__)
 VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9\-]*$")
 VALID_MODES = {"inline", "fork"}
 VALID_CONTEXTS = {"full", "recent", "none"}
+VALID_PERMISSION_EFFECTS = {"allow", "deny", "ask"}
+_PERMISSION_RULE_RE = re.compile(r"^\w+\(.+\)$")
 
 
 class SkillParseError(Exception):
@@ -29,6 +31,55 @@ class SkillDef:
     context: Literal["full", "recent", "none"] = "full"
     source_path: Path | None = None
     is_directory: bool = False
+    permission_rules: dict[str, list[str]] = field(default_factory=dict)
+
+
+def parse_skill_permissions(
+    meta: dict, source: str = ""
+) -> dict[str, list[str]]:
+    """Parse scoped tool rules declared by a skill.
+
+    Preferred syntax is ``permissions: {allow|deny|ask: [Tool(pattern)]}``.
+    ``allowed-tools`` and ``disallowed-tools`` accept bare tool names as a
+    compatibility shorthand, which expands to ``Tool(*)``.
+    """
+
+    ctx = f" in {source}" if source else ""
+    collected: dict[str, list[str]] = {effect: [] for effect in VALID_PERMISSION_EFFECTS}
+    raw = meta.get("permissions", {})
+    if raw is not None and not isinstance(raw, dict):
+        raise SkillParseError(f"permissions must be a mapping{ctx}")
+    for effect, entries in (raw or {}).items():
+        if effect not in VALID_PERMISSION_EFFECTS:
+            raise SkillParseError(f"Invalid permission effect '{effect}'{ctx}")
+        if isinstance(entries, str):
+            entries = [entries]
+        if not isinstance(entries, list) or not all(
+            isinstance(entry, str) for entry in entries
+        ):
+            raise SkillParseError(f"permissions.{effect} must be a string list{ctx}")
+        collected[effect].extend(entries)
+
+    for key, effect in (("allowed-tools", "allow"), ("disallowed-tools", "deny")):
+        entries = meta.get(key, [])
+        if isinstance(entries, str):
+            entries = [entries]
+        if not isinstance(entries, list) or not all(
+            isinstance(entry, str) for entry in entries
+        ):
+            raise SkillParseError(f"{key} must be a string list{ctx}")
+        collected[effect].extend(
+            entry if "(" in entry else f"{entry}(*)" for entry in entries
+        )
+
+    for effect, entries in collected.items():
+        for entry in entries:
+            if not _PERMISSION_RULE_RE.fullmatch(entry.strip()):
+                raise SkillParseError(
+                    f"Invalid permissions.{effect} rule '{entry}'{ctx}: "
+                    "expected ToolName(pattern)"
+                )
+    return {effect: entries for effect, entries in collected.items() if entries}
 
 
 def parse_frontmatter(raw: str) -> tuple[dict, str]:
@@ -77,6 +128,8 @@ def _validate_meta(meta: dict, source: str = "") -> None:
     if context not in VALID_CONTEXTS:
         raise SkillParseError(f"Invalid context '{context}'{ctx}: must be one of {VALID_CONTEXTS}")
 
+    parse_skill_permissions(meta, source)
+
 
 def parse_skill_file(path: Path) -> SkillDef:
     try:
@@ -94,6 +147,7 @@ def parse_skill_file(path: Path) -> SkillDef:
         mode=meta.get("mode", "inline"),
         model=meta.get("model"),
         context=meta.get("context", "full"),
+        permission_rules=parse_skill_permissions(meta, str(path)),
         source_path=path,
         is_directory=False,
     )

@@ -6,7 +6,7 @@ from typing import Any
 
 from valecode.permissions.dangerous import DangerousCommandDetector, is_safe_command
 from valecode.permissions.modes import DecisionEffect, PermissionMode, mode_decide
-from valecode.permissions.rules import RuleEngine, extract_content
+from valecode.permissions.rules import RuleEngine, extract_content, parse_rule
 from valecode.permissions.sandbox import PathSandbox
 from valecode.tools.base import Tool
 
@@ -62,6 +62,31 @@ class PermissionChecker:
             if allowed.endswith("*") and key.startswith(allowed[:-1]):
                 return True
         return False
+
+    def bind_skill_scope(
+        self, skill_name: str, permission_rules: dict[str, list[str]]
+    ) -> None:
+        rules = [
+            parse_rule(raw, effect)  # type: ignore[arg-type]
+            for effect, entries in permission_rules.items()
+            for raw in entries
+        ]
+        self.rule_engine.bind_scope(f"skill:{skill_name}", rules)
+
+    def release_skill_scope(self, skill_name: str) -> None:
+        self.rule_engine.release_scope(f"skill:{skill_name}")
+
+    def clone(self) -> PermissionChecker:
+        cloned = PermissionChecker(
+            detector=self.detector,
+            sandbox=self.sandbox,
+            rule_engine=self.rule_engine.clone(),
+            mode=self.mode,
+            sandbox_enabled=self.sandbox_enabled,
+        )
+        cloned.plan_file_path = self.plan_file_path
+        cloned._session_allowed = set(self._session_allowed)
+        return cloned
 
     @staticmethod
     def describe_tool_action(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -134,6 +159,16 @@ class PermissionChecker:
             return Decision(effect="allow", reason="权限规则放行")
         if rule_result == "deny":
             return Decision(effect="deny", reason="权限规则拒绝")
+
+        # Layer 3b: active Skill scopes. Persistent user/project rules above
+        # retain authority; dangerous-command and path checks can never be
+        # bypassed by a Skill declaration.
+        scoped_result = self.rule_engine.evaluate_scoped(permission_name, content)
+        if scoped_result is not None:
+            return Decision(
+                effect=scoped_result,
+                reason=f"Skill 权限作用域 {scoped_result}",
+            )
 
         # Layer 4b: 会话级放行（内存中，优先于模式兜底）
         if self._check_session_allowed(permission_name, content or ""):

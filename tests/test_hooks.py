@@ -499,6 +499,114 @@ class TestHookEngine:
         # 给异步任务一点时间完成
         await asyncio.sleep(0.1)
 
+    @pytest.mark.asyncio
+    async def test_all_action_types_use_engine_timeout_policy(self):
+        h = self._make_hook(
+            id="slow-prompt",
+            action=Action(type="prompt", message="slow", timeout=0.01),
+        )
+        engine = HookEngine([h])
+
+        async def slow_action(action, ctx):
+            await asyncio.sleep(10)
+            return ActionResult(output="late")
+
+        with patch("valecode.hooks.engine.execute_action", side_effect=slow_action):
+            await engine.run_hooks("post_tool_use", HookContext())
+
+        notification = engine.drain_notifications()[0]
+        assert notification.success is False
+        assert notification.error_type == "TimeoutError"
+        assert notification.duration_ms > 0
+        assert "timed out" in notification.output
+
+    @pytest.mark.asyncio
+    async def test_reject_hook_fails_closed_on_timeout(self):
+        h = self._make_hook(
+            id="guard",
+            event="pre_tool_use",
+            action=Action(type="prompt", message="guard", timeout=0.01),
+            reject=True,
+        )
+        engine = HookEngine([h])
+
+        async def slow_action(action, ctx):
+            await asyncio.sleep(10)
+            return ActionResult(output="late")
+
+        with patch("valecode.hooks.engine.execute_action", side_effect=slow_action):
+            rejection = await engine.run_pre_tool_hooks(
+                HookContext(event_name="pre_tool_use", tool_name="Bash")
+            )
+
+        assert rejection is not None
+        assert "timed out" in rejection.reason
+
+    @pytest.mark.asyncio
+    async def test_hook_span_contains_runtime_context(self):
+        from contextlib import contextmanager
+
+        calls: list[tuple[str, dict, str | None]] = []
+        updates: list[dict] = []
+
+        class Span:
+            def set_attributes(self, attributes):
+                updates.append(attributes)
+
+            def set_error(self, description):
+                raise AssertionError("successful hook must not be marked failed")
+
+        class Tracing:
+            @contextmanager
+            def span(self, name, attributes, *, trace_id=None):
+                calls.append((name, attributes, trace_id))
+                yield Span()
+
+        h = self._make_hook(
+            id="traced",
+            action=Action(type="prompt", message="ok"),
+        )
+        engine = HookEngine([h], tracing=Tracing())
+        await engine.run_hooks(
+            "post_tool_use",
+            HookContext(
+                event_name="post_tool_use",
+                tool_name="ReadFile",
+                trace_id="trace-1",
+                session_id="session-1",
+                run_id="run-1",
+                step_id="step-1",
+                tool_call_id="tool-1",
+            ),
+        )
+
+        assert calls[0][0] == "hook.execute"
+        assert calls[0][1]["run.id"] == "run-1"
+        assert calls[0][1]["tool.call_id"] == "tool-1"
+        assert calls[0][2] == "trace-1"
+        assert updates[0]["hook.success"] is True
+
+    @pytest.mark.asyncio
+    async def test_shutdown_waits_for_async_hooks(self):
+        completed = asyncio.Event()
+        h = self._make_hook(
+            id="async",
+            action=Action(type="prompt", message="ok"),
+            async_exec=True,
+        )
+        engine = HookEngine([h])
+
+        async def action(action, ctx):
+            await asyncio.sleep(0)
+            completed.set()
+            return ActionResult(output="done")
+
+        with patch("valecode.hooks.engine.execute_action", side_effect=action):
+            await engine.run_hooks("post_tool_use", HookContext())
+            await engine.shutdown()
+
+        assert completed.is_set()
+
 # ---------------------------------------------------------------------------
 # Agent 循环集成
 # ---------------------------------------------------------------------------

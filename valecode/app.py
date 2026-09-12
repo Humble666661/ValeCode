@@ -1936,16 +1936,19 @@ class VelaCodeApp(App):
         async def _cleanup() -> None:
             tasks: list[asyncio.Task] = []
 
+            async def _shutdown_hooks() -> None:
+                assert self.hook_engine is not None
+                await self.hook_engine.run_hooks(
+                    "shutdown", HookContext(event_name="shutdown")
+                )
+                await self.hook_engine.shutdown()
+
             if self.agent and self.agent.memory_manager:
                 tasks.append(asyncio.create_task(
                     self.agent._extract_memories(self.conversation)
                 ))
             if self.hook_engine:
-                tasks.append(asyncio.create_task(
-                    self.hook_engine.run_hooks(
-                        "shutdown", HookContext(event_name="shutdown")
-                    )
-                ))
+                tasks.append(asyncio.create_task(_shutdown_hooks()))
             tasks.append(asyncio.create_task(self._shutdown_mcp()))
             tasks.append(asyncio.create_task(self.registry.release_session()))
 

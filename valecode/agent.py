@@ -158,6 +158,8 @@ class HookEvent(RuntimeEvent):
     event: str
     output: str
     success: bool
+    duration_ms: float = 0.0
+    error_type: str = ""
 
 
 class PermissionResponse(Enum):
@@ -490,6 +492,11 @@ class Agent:
             file_path=str(kwargs.get("file_path", "")),
             message=str(kwargs.get("message", "")),
             error=str(kwargs.get("error", "")),
+            trace_id=self._current_trace_id or self.trace_id or "",
+            session_id=self.session_id,
+            run_id=self._current_run_id or "",
+            step_id=self._current_step_id or "",
+            tool_call_id=str(kwargs.get("tool_call_id", "")),
         )
 
     def _infer_file_path(self, args: dict) -> str:
@@ -504,6 +511,8 @@ class Agent:
                 event=n.event,
                 output=n.output,
                 success=n.success,
+                duration_ms=n.duration_ms,
+                error_type=n.error_type,
             )
             for n in self.hook_engine.drain_notifications()
         ]
@@ -1436,6 +1445,9 @@ class Agent:
                                 tool_name=tc.tool_name,
                                 tool_args=tc.arguments,
                                 file_path=file_path,
+                                tool_call_id=self._control_tool_ids.get(
+                                    tc.tool_id, tc.tool_id
+                                ),
                             )
                             rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
                             for he in self._drain_hook_events():
@@ -1495,6 +1507,9 @@ class Agent:
                                 tool_name=tc.tool_name,
                                 tool_args=tc.arguments,
                                 file_path=file_path,
+                                tool_call_id=self._control_tool_ids.get(
+                                    tc.tool_id, tc.tool_id
+                                ),
                             )
                             await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
                             for he in self._drain_hook_events():
@@ -2255,6 +2270,7 @@ class Agent:
                 tool_name=tc.tool_name,
                 tool_args=tc.arguments,
                 file_path=file_path,
+                tool_call_id=self._control_tool_ids.get(tc.tool_id, tc.tool_id),
             )
             rejection = await self.hook_engine.run_pre_tool_hooks(hook_ctx)
             if rejection is not None:
@@ -2313,6 +2329,7 @@ class Agent:
                 tool_name=tc.tool_name,
                 tool_args=tc.arguments,
                 file_path=file_path,
+                tool_call_id=self._control_tool_ids.get(tc.tool_id, tc.tool_id),
             )
             await self.hook_engine.run_hooks("post_tool_use", hook_ctx)
 

@@ -55,6 +55,11 @@ class HookContext:
     file_path: str = ""
     message: str = ""
     error: str = ""
+    trace_id: str = ""
+    session_id: str = ""
+    run_id: str = ""
+    step_id: str = ""
+    tool_call_id: str = ""
 
     def get_field(self, name: str) -> str:
         if name == "tool":

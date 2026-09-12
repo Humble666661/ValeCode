@@ -12,3 +12,6 @@ build/
 .valecode/
 .claude/
 CLAUDE.md
+
+# Local development planning and progress notes
+docs/

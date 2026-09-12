@@ -1,5 +1,6 @@
 """Execution reliability helpers for retry, recovery, and idempotency."""
 
+from valecode.runtime.events import EventEnvelope, RuntimeEvent
 from valecode.runtime.loop_guard import LoopDecision, LoopGuard
 from valecode.runtime.retry import (
     ErrorCategory,
@@ -10,11 +11,13 @@ from valecode.runtime.retry import (
 )
 
 __all__ = [
+    "EventEnvelope",
     "ErrorCategory",
     "LoopDecision",
     "LoopGuard",
     "RetryDecision",
     "RetryPolicy",
+    "RuntimeEvent",
     "classify_provider_error",
     "parse_retry_after",
 ]
@@ -33,7 +36,7 @@ from valecode.runtime.recovery import (
     ToolRecovery,
 )
 
-__all__ = [
+__all__ += [
     "FileEffectState",
     "RecoveryAction",
     "RecoveryReport",

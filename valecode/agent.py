@@ -43,7 +43,7 @@ from valecode.persistence import (
     ToolCallStatus,
 )
 from valecode.runtime.idempotency import make_tool_idempotency_key
-from valecode.runtime import LoopGuard, RetryPolicy
+from valecode.runtime import LoopGuard, RetryPolicy, RuntimeEvent
 from valecode.observability import Tracing, get_tracing
 from valecode.hooks import HookContext, HookEngine, ToolRejectedError
 from valecode.hooks.engine import HookNotification
@@ -74,30 +74,35 @@ MAX_OUTPUT_TOKENS_RECOVERIES = 3
 # ---------------------------------------------------------------------------
 
 @dataclass
-class StreamText:
+class StreamText(RuntimeEvent):
+    EVENT_TYPE = "stream.text"
     text: str
 
 
 @dataclass
-class ThinkingText:
+class ThinkingText(RuntimeEvent):
+    EVENT_TYPE = "stream.thinking"
     text: str
 
 
 @dataclass
-class RetryEvent:
+class RetryEvent(RuntimeEvent):
+    EVENT_TYPE = "llm.retry"
     reason: str
     wait: float = 0.0
 
 
 @dataclass
-class ToolUseEvent:
+class ToolUseEvent(RuntimeEvent):
+    EVENT_TYPE = "tool.use"
     tool_name: str
     tool_id: str
     arguments: dict[str, Any]
 
 
 @dataclass
-class ToolResultEvent:
+class ToolResultEvent(RuntimeEvent):
+    EVENT_TYPE = "tool.result"
     tool_id: str
     tool_name: str
     output: str
@@ -106,28 +111,33 @@ class ToolResultEvent:
 
 
 @dataclass
-class TurnComplete:
+class TurnComplete(RuntimeEvent):
+    EVENT_TYPE = "turn.completed"
     turn: int
 
 
 @dataclass
-class LoopComplete:
+class LoopComplete(RuntimeEvent):
+    EVENT_TYPE = "run.completed"
     total_turns: int
 
 
 @dataclass
-class UsageEvent:
+class UsageEvent(RuntimeEvent):
+    EVENT_TYPE = "usage.updated"
     input_tokens: int
     output_tokens: int
 
 
 @dataclass
-class ErrorEvent:
+class ErrorEvent(RuntimeEvent):
+    EVENT_TYPE = "runtime.error"
     message: str
 
 
 @dataclass
-class CompactNotification:
+class CompactNotification(RuntimeEvent):
+    EVENT_TYPE = "context.compacted"
     before_tokens: int
     message: str
     # 结构化 boundary（摘要 + 原文保留尾部），UI/session 层用它持久化 compact_boundary 记录。
@@ -136,7 +146,8 @@ class CompactNotification:
 
 
 @dataclass
-class HookEvent:
+class HookEvent(RuntimeEvent):
+    EVENT_TYPE = "hook.completed"
     hook_id: str
     event: str
     output: str
@@ -150,7 +161,8 @@ class PermissionResponse(Enum):
 
 
 @dataclass
-class PermissionRequest:
+class PermissionRequest(RuntimeEvent):
+    EVENT_TYPE = "permission.requested"
     tool_name: str
     description: str
     future: asyncio.Future[PermissionResponse]
@@ -360,6 +372,7 @@ class Agent:
         self._current_step_id: str | None = None
         self._control_tool_ids: dict[str, str] = {}
         self._loop_count = 0
+        self._event_sequence = 0
         # 记忆提取合并策略（对齐 Go 版 inProgress + pendingContext）：
         # _extracting: 标记是否有提取正在进行
         # _pending_extraction: 提取期间又触发了新请求，标记需要尾随提取
@@ -774,6 +787,37 @@ class Agent:
             )
         )
 
+    def _prepare_event(self, event: AgentEvent) -> AgentEvent:
+        self._event_sequence += 1
+        provider_tool_id = getattr(event, "tool_id", None)
+        stored_tool_id = (
+            self._control_tool_ids.get(provider_tool_id)
+            if isinstance(provider_tool_id, str)
+            else None
+        )
+        event.stamp(
+            sequence=self._event_sequence,
+            session_id=self.session_id or None,
+            run_id=self._current_run_id,
+            step_id=self._current_step_id,
+            tool_call_id=stored_tool_id,
+            trace_id=self._current_trace_id or self.trace_id,
+        )
+        envelope = event.to_envelope()
+        if self.run_store is not None:
+            self._control_call(
+                lambda: self.run_store.events.append(
+                    f"runtime.{envelope.event_type}",
+                    session_id=envelope.session_id,
+                    run_id=envelope.run_id,
+                    step_id=envelope.step_id,
+                    tool_call_id=envelope.tool_call_id,
+                    idempotency_key=f"runtime:{envelope.event_id}",
+                    payload=envelope.to_dict(),
+                )
+            )
+        return event
+
     async def _consume_llm_stream(
         self,
         collector: StreamCollector,
@@ -964,6 +1008,7 @@ class Agent:
 
     async def run(self, conversation: ConversationManager) -> AsyncIterator[AgentEvent]:
         self._start_control_run(conversation)
+        self._event_sequence = 0
         run_id = self._current_run_id
         trace_id = self._current_trace_id
         trace_context = self.tracing.span(
@@ -984,6 +1029,7 @@ class Agent:
         run_status = "running"
         try:
             async for event in self._run_loop(conversation):
+                event = self._prepare_event(event)
                 if isinstance(event, LoopComplete):
                     completed = True
                 yield event

@@ -174,6 +174,24 @@ class PermissionRequest(RuntimeEvent):
     future: asyncio.Future[PermissionResponse]
 
 
+@dataclass
+class PermissionDecisionEvent(RuntimeEvent):
+    EVENT_TYPE = "permission.responded"
+    tool_name: str
+    response: str
+
+
+@dataclass
+class MailboxEvent(RuntimeEvent):
+    EVENT_TYPE = "mailbox.received"
+    message_id: str
+    from_agent: str
+    to_agent: str
+    message_type: str
+    content: str
+    summary: str = ""
+
+
 AgentEvent = (
     StreamText
     | ThinkingText
@@ -185,6 +203,8 @@ AgentEvent = (
     | UsageEvent
     | ErrorEvent
     | PermissionRequest
+    | PermissionDecisionEvent
+    | MailboxEvent
     | CompactNotification
     | HookEvent
 )
@@ -1138,7 +1158,8 @@ class Agent:
                 for he in self._drain_hook_events():
                     yield he
 
-            self._consume_mailbox(conversation)
+            for mailbox_event in self._consume_mailbox(conversation):
+                yield mailbox_event
             if self.notification_fn:
                 for note in self.notification_fn():
                     conversation.add_system_reminder(note)
@@ -1454,7 +1475,7 @@ class Agent:
 
                         if result is None:
                             async for item in self._execute_tool(tc):
-                                if isinstance(item, PermissionRequest):
+                                if isinstance(item, RuntimeEvent):
                                     yield item
                                 else:
                                     result, elapsed, is_unknown = item
@@ -1551,13 +1572,14 @@ class Agent:
             yield TurnComplete(turn=iteration)
 
 
-    def _consume_mailbox(self, conversation: ConversationManager) -> None:
+    def _consume_mailbox(self, conversation: ConversationManager) -> list[MailboxEvent]:
         if not self.team_name or not self._team_manager:
-            return
+            return []
+        events: list[MailboxEvent] = []
         try:
             mailbox = self._team_manager.get_mailbox(self.team_name)
             if mailbox is None:
-                return
+                return []
             messages = mailbox.consume(self.agent_id)
             for msg in messages:
                 prefix = f"[Message from {msg.from_agent}]"
@@ -1565,8 +1587,19 @@ class Agent:
                     prefix = f"[{msg.message_type} from {msg.from_agent}]"
                 content = f"{prefix} {msg.content}"
                 conversation.add_user_message(content)
+                events.append(
+                    MailboxEvent(
+                        message_id=msg.id,
+                        from_agent=msg.from_agent,
+                        to_agent=msg.to_agent,
+                        message_type=msg.message_type,
+                        content=msg.content,
+                        summary=msg.summary,
+                    )
+                )
         except Exception as e:
             log.debug("Mailbox consumption failed: %s", e)
+        return events
 
     def _build_permission_description(self, tc: ToolCallComplete) -> str:
         """为 HITL 权限确认生成人类可读的操作描述。"""
@@ -1649,7 +1682,7 @@ class Agent:
 
     async def _execute_tool(
         self, tc: ToolCallComplete
-    ) -> AsyncIterator[tuple[ToolResult, float, bool]]:
+    ) -> AsyncIterator[RuntimeEvent | tuple[ToolResult, float, bool]]:
         trace_context = self.tracing.span(
             "tool.execute",
             {
@@ -1663,7 +1696,7 @@ class Agent:
         span = trace_context.__enter__()
         try:
             async for item in self._execute_tool_untraced(tc):
-                if not isinstance(item, PermissionRequest):
+                if not isinstance(item, RuntimeEvent):
                     result, elapsed, is_unknown = item
                     span.set_attributes(
                         {
@@ -1684,7 +1717,7 @@ class Agent:
 
     async def _execute_tool_untraced(
         self, tc: ToolCallComplete
-    ) -> AsyncIterator[PermissionRequest | tuple[ToolResult, float, bool]]:
+    ) -> AsyncIterator[RuntimeEvent | tuple[ToolResult, float, bool]]:
         tool = self.registry.get(tc.tool_name)
         start = time.monotonic()
         is_unknown = False
@@ -1767,6 +1800,10 @@ class Agent:
                         operation=f"permission response for {tc.tool_name}",
                     )
                     wait_span.set_attributes({"permission.response": response.value})
+                yield PermissionDecisionEvent(
+                    tool_name=tc.tool_name,
+                    response=response.value,
+                )
                 self._finish_control_run(RunStatus.RUNNING)
                 self._finish_control_step(StepStatus.RUNNING)
 
@@ -1892,6 +1929,7 @@ class Agent:
             conversation = ConversationManager()
         if self._owns_cancellation_token:
             self.cancellation_token = CancellationToken()
+        self._event_sequence = 0
         self._start_control_run(conversation, input_text=task)
         run_id = self._current_run_id
         trace_context = self.tracing.span(
@@ -2002,7 +2040,15 @@ class Agent:
                 ctx = self._build_hook_context("turn_start")
                 await self.hook_engine.run_hooks("turn_start", ctx)
 
-            self._consume_mailbox(conversation)
+            for mailbox_event in self._consume_mailbox(conversation):
+                prepared = self._prepare_event(mailbox_event)
+                if event_callback:
+                    event_callback(
+                        {
+                            "type": "runtime_event",
+                            "event": prepared.to_envelope().to_dict(),
+                        }
+                    )
             if self.notification_fn:
                 for note in self.notification_fn():
                     conversation.add_system_reminder(note)

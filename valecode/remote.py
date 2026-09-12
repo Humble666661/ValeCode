@@ -201,6 +201,7 @@ class RemoteServer:
                 elif msg_type == "cancel":
                     if self._cancel_event is not None:
                         self._cancel_event.set()
+                        self.agent.cancel("Cancelled by remote client")
 
                 elif msg_type == "ping":
                     # 应用层保活
@@ -485,6 +486,12 @@ class RemoteServer:
                         "data": {
                             "message": f"Hook [{event.hook_id}] {status}: {event.output}"
                         },
+                    })
+
+                elif event.EVENT_TYPE in {"permission.responded", "mailbox.received"}:
+                    await self._broadcast({
+                        "type": "runtime_event",
+                        "data": event.to_envelope().to_dict(),
                     })
 
         except asyncio.CancelledError:

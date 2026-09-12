@@ -125,6 +125,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         TurnComplete,
         UsageEvent,
     )
+    from valecode.runtime import RuntimeEvent
     from valecode.client import create_client, resolve_context_window
     from valecode.conversation import ConversationManager
     from valecode.memory.instructions import load_instructions
@@ -342,6 +343,12 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         elif isinstance(event, PermissionRequest):
             # -p 非交互模式：自动批准所有权限请求
             event.future.set_result(PermissionResponse.ALLOW)
+
+        elif isinstance(event, RuntimeEvent) and is_json:
+            emit_json({
+                "type": "runtime_event",
+                "event": event.to_envelope().to_dict(),
+            })
 
     # 如果有 team 在运行，轮询等待 teammate 完成
     if not team_manager._teams:

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import uuid
 from pathlib import Path
 
 from valecode.worktree.models import WorktreeSession
@@ -36,7 +38,12 @@ def save_worktree_session(
         "session_id": session.session_id,
         "hook_based": session.hook_based,
     }
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def load_worktree_session(valecode_dir: Path) -> WorktreeSession | None:
@@ -59,4 +66,3 @@ def load_worktree_session(valecode_dir: Path) -> WorktreeSession | None:
     except (json.JSONDecodeError, KeyError) as e:
         log.warning("Failed to load worktree session: %s", e)
         return None
-

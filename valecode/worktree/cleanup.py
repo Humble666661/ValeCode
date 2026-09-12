@@ -64,18 +64,9 @@ async def cleanup_stale_worktrees(manager: WorktreeManager, cutoff_hours: int) -
             continue
 
         try:
-            flat_name = name
-            if flat_name in manager.active:
-                await manager._remove_worktree(flat_name, manager.active[flat_name])
-            else:
-                result = manager._run_git(
-                    ["worktree", "remove", "--force", str(entry)]
-                )
-                if result.returncode == 0:
-                    await asyncio.sleep(0.1)
-                    manager._run_git(["branch", "-D", f"worktree-{flat_name}"])
-            removed += 1
-            log.info("Cleaned up stale worktree: %s", name)
+            if await manager.remove_stale(name, str(entry)):
+                removed += 1
+                log.info("Cleaned up stale worktree: %s", name)
         except Exception as e:
             log.warning("Failed to clean up stale worktree %s: %s", name, e)
 
@@ -95,4 +86,3 @@ async def start_stale_cleanup_task(
                 log.info("Stale worktree cleanup removed %d worktrees", count)
         except Exception as e:
             log.warning("Stale worktree cleanup error: %s", e)
-

@@ -19,6 +19,7 @@ from valecode.teams.progress import TeammateProgress
 from valecode.teams.registry import AgentNameRegistry
 from valecode.teams.shared_task import DurableSharedTaskStore, SharedTaskStore
 from valecode.teams.spawn_inprocess import InProcessTeammateHandle
+from valecode.worktree.paths import canonical_path, is_path_within, require_path_within
 
 if TYPE_CHECKING:
     from valecode.agent import Agent
@@ -285,25 +286,43 @@ class TeamManager:
             log.warning("Failed to kill pane %s: %s", pane_id, e)
 
     def _cleanup_worktree(self, worktree_path: str) -> None:
-        import subprocess
+        manager = self._worktree_manager
+        if manager is None or not is_path_within(worktree_path, manager.worktree_dir):
+            log.warning("Refusing unmanaged team worktree cleanup: %s", worktree_path)
+            return
         try:
-            subprocess.run(
-                ["git", "worktree", "remove", worktree_path, "--force"],
-                capture_output=True, timeout=10,
+            registration = manager._registered_worktrees().get(
+                canonical_path(worktree_path)
             )
+            if registration is None:
+                log.warning("Team worktree is not registered: %s", worktree_path)
+                return
+            result = manager._run_git(
+                ["worktree", "remove", "--force", "--", worktree_path]
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "git worktree remove failed for %s: %s",
+                    worktree_path,
+                    result.stderr.strip(),
+                )
+                return
+            branch_ref = registration.get("branch", "")
+            if branch_ref.startswith("refs/heads/"):
+                manager._run_git(
+                    ["branch", "-D", "--", branch_ref.removeprefix("refs/heads/")]
+                )
         except Exception as e:
             log.warning("git worktree remove failed for %s: %s", worktree_path, e)
-            import shutil
-            try:
-                if Path(worktree_path).exists():
-                    shutil.rmtree(worktree_path, ignore_errors=True)
-            except Exception:
-                pass
 
     def _remove_dir(self, path: Path) -> None:
         import shutil
         try:
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=True)
+            team_root = resolve_team_dir("boundary-probe").parent
+            safe_path = require_path_within(path, team_root, label="team directory")
+            if safe_path.exists():
+                shutil.rmtree(safe_path, ignore_errors=True)
+        except ValueError as e:
+            log.warning("Refusing unsafe team directory removal %s: %s", path, e)
         except Exception as e:
             log.warning("Failed to remove directory %s: %s", path, e)

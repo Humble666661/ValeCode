@@ -17,7 +17,9 @@ from valecode.worktree.changes import count_worktree_changes, has_worktree_chang
 from valecode.worktree.integration import build_worktree_notice, generate_worktree_name
 from valecode.worktree.manager import WorktreeError, WorktreeManager
 from valecode.worktree.models import WorktreeSession
+from valecode.worktree.paths import is_path_within, require_path_within
 from valecode.worktree.session import load_worktree_session, save_worktree_session
+from valecode.worktree.setup import _create_symlinks
 from valecode.worktree.slug import flatten_slug, validate_slug
 
 # =========================================================================
@@ -69,6 +71,13 @@ class TestValidateSlug:
     def test_empty_segment(self):
         assert validate_slug("foo//bar") is not None
 
+    @pytest.mark.parametrize("name", ["CON", "nul.txt", "COM1", "lpt9.log"])
+    def test_windows_reserved_names(self, name):
+        assert "Windows reserved" in validate_slug(name)
+
+    def test_windows_trailing_dot(self):
+        assert validate_slug("feature.") is not None
+
 class TestFlattenSlug:
     def test_no_slash(self):
         assert flatten_slug("my-feature") == "my-feature"
@@ -78,6 +87,27 @@ class TestFlattenSlug:
 
     def test_multiple_slashes(self):
         assert flatten_slug("a/b/c") == "a+b+c"
+
+
+class TestWorktreePathBoundaries:
+    def test_sibling_prefix_is_not_inside(self, tmp_path):
+        root = tmp_path / "worktrees"
+        sibling = tmp_path / "worktrees-escape" / "task"
+        assert not is_path_within(sibling, root)
+        with pytest.raises(ValueError, match="escapes"):
+            require_path_within(sibling, root)
+
+    def test_unsafe_symlink_config_is_ignored(self, tmp_path):
+        root = tmp_path / "repo"
+        wt = tmp_path / "worktree"
+        root.mkdir()
+        wt.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        _create_symlinks(root, wt, ["../outside"])
+
+        assert not (wt / ".." / "outside").is_symlink()
 
 # =========================================================================
 # B. FileCache
@@ -259,6 +289,53 @@ class TestWorktreeManager:
             await manager.create("dup")
 
     @pytest.mark.asyncio
+    async def test_create_case_insensitive_duplicate(self, manager):
+        await manager.create("CaseName")
+        with pytest.raises(WorktreeError, match="already exists"):
+            await manager.create("casename")
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_existing_branch_without_reset(
+        self, manager, git_repo
+    ):
+        subprocess.run(
+            ["git", "branch", "worktree-conflict", "HEAD"],
+            cwd=git_repo,
+            capture_output=True,
+            check=True,
+        )
+        before = subprocess.run(
+            ["git", "rev-parse", "worktree-conflict"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        with pytest.raises(WorktreeError, match="branch already exists"):
+            await manager.create("conflict")
+
+        after = subprocess.run(
+            ["git", "rev-parse", "worktree-conflict"],
+            cwd=git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert after == before
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_occupied_non_worktree_path(self, manager):
+        occupied = Path(manager.worktree_dir) / "occupied"
+        occupied.mkdir(parents=True)
+        (occupied / "data.txt").write_text("user data", encoding="utf-8")
+
+        with pytest.raises(WorktreeError, match="not reusable"):
+            await manager.create("occupied")
+
+        assert (occupied / "data.txt").read_text(encoding="utf-8") == "user data"
+
+    @pytest.mark.asyncio
     async def test_create_nested_slug(self, manager):
         wt = await manager.create("team/alice")
         assert wt.branch == "worktree-team+alice"
@@ -309,6 +386,50 @@ class TestWorktreeManager:
         await manager.enter("exit-protect")
         with pytest.raises(WorktreeError, match="has changes"):
             await manager.exit("exit-protect", action="remove", discard_changes=False)
+
+    @pytest.mark.asyncio
+    async def test_failed_git_remove_keeps_session_and_branch(
+        self, manager, monkeypatch
+    ):
+        wt = await manager.create("remove-fails")
+        await manager.enter("remove-fails")
+        original_run_git = manager._run_git
+
+        def fail_remove(args, cwd=None):
+            if args[:2] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(args, 1, "", "simulated failure")
+            return original_run_git(args, cwd)
+
+        monkeypatch.setattr(manager, "_run_git", fail_remove)
+        with pytest.raises(WorktreeError, match="simulated failure"):
+            await manager.exit(
+                "remove-fails", action="remove", discard_changes=True
+            )
+
+        assert manager.current_session is not None
+        assert "remove-fails" in manager.active
+        assert Path(wt.path).exists()
+        branch = original_run_git(
+            ["show-ref", "--verify", "--quiet", "refs/heads/worktree-remove-fails"]
+        )
+        assert branch.returncode == 0
+
+    def test_restore_rejects_session_outside_managed_directory(
+        self, manager, tmp_path
+    ):
+        save_worktree_session(
+            manager._valecode_dir,
+            WorktreeSession(
+                original_cwd=str(tmp_path),
+                worktree_path=str(tmp_path / "outside"),
+                worktree_name="outside",
+                original_branch="main",
+                original_head_commit="abc",
+            ),
+        )
+
+        assert manager.restore_session() is None
+        assert load_worktree_session(manager._valecode_dir) is None
 
     @pytest.mark.asyncio
     async def test_list_worktrees(self, manager):

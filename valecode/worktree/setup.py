@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from valecode.worktree.paths import require_path_within
+
 log = logging.getLogger(__name__)
 
 LOCAL_CONFIG_FILES = [
@@ -69,8 +71,15 @@ def _setup_git_hooks(root: Path, wt: Path) -> None:
 
 def _create_symlinks(root: Path, wt: Path, directories: list[str]) -> None:
     for dirname in directories:
-        src = root / dirname
-        dst = wt / dirname
+        try:
+            relative = Path(dirname)
+            if relative.is_absolute():
+                raise ValueError("absolute path")
+            src = require_path_within(root / relative, root, label="symlink source")
+            dst = require_path_within(wt / relative, wt, label="symlink target")
+        except (OSError, ValueError) as e:
+            log.warning("Skipped unsafe worktree symlink %s: %s", dirname, e)
+            continue
         if not src.exists():
             continue
         if dst.exists() or dst.is_symlink():
@@ -119,8 +128,15 @@ def _copy_ignored_files(root: Path, wt: Path) -> None:
     for rel_path in ignored_files:
         if not any(fnmatch.fnmatch(rel_path, pat) for pat in patterns):
             continue
-        src = root / rel_path
-        dst = wt / rel_path
+        try:
+            relative = Path(rel_path)
+            if relative.is_absolute():
+                raise ValueError("absolute path")
+            src = require_path_within(root / relative, root, label="included source")
+            dst = require_path_within(wt / relative, wt, label="included target")
+        except (OSError, ValueError) as e:
+            log.warning("Skipped unsafe worktree include %s: %s", rel_path, e)
+            continue
         if not src.is_file():
             continue
         try:

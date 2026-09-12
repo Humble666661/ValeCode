@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -641,29 +642,51 @@ class AgentTool(Tool):
         )
         sub_agent.agent_id = trace_node.agent_id
 
+        result_text = ""
+        failure: Exception | None = None
         try:
             result_text = await sub_agent.run_to_completion(task)
+        except asyncio.CancelledError:
+            self._trace_manager.complete(trace_node.agent_id, "cancelled")
+            try:
+                await self._worktree_manager.auto_cleanup(wt_name, wt.head_commit)
+            except Exception:
+                log.exception("Failed to clean up cancelled worktree %s", wt.path)
+            raise
         except Exception as e:
-            self._trace_manager.complete(trace_node.agent_id, "failed")
-            return ToolResult(
-                output=f"Sub-agent in worktree failed: {e}",
-                is_error=True,
-            )
+            failure = e
 
         self._trace_manager.update(
             trace_node.agent_id,
             input_tokens=sub_agent.total_input_tokens,
             output_tokens=sub_agent.total_output_tokens,
         )
-        self._trace_manager.complete(trace_node.agent_id, "completed")
+        self._trace_manager.complete(
+            trace_node.agent_id, "failed" if failure is not None else "completed"
+        )
 
-        cleanup = await self._worktree_manager.auto_cleanup(wt_name, wt.head_commit)
-        if cleanup.kept:
-            result_text = (result_text or "") + (
-                f"\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
+        try:
+            cleanup = await self._worktree_manager.auto_cleanup(
+                wt_name, wt.head_commit
             )
+        except Exception as cleanup_error:
+            cleanup = None
+            log.warning("Worktree cleanup failed for %s: %s", wt.path, cleanup_error)
 
-        return ToolResult(output=result_text or "(sub-agent returned no output)")
+        preservation = ""
+        if cleanup is None or cleanup.kept:
+            path = cleanup.path if cleanup is not None else wt.path
+            branch = cleanup.branch if cleanup is not None else wt.branch
+            preservation = f"\n[Worktree preserved at {path}, branch {branch}]"
+
+        if failure is not None:
+            return ToolResult(
+                output=f"Sub-agent in worktree failed: {failure}{preservation}",
+                is_error=True,
+            )
+        return ToolResult(
+            output=(result_text or "(sub-agent returned no output)") + preservation
+        )
 
 
     def _create_client_for_model(self, model_alias: str) -> LLMClient | None:

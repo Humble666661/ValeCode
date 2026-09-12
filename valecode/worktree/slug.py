@@ -5,6 +5,11 @@ import re
 
 MAX_SLUG_LENGTH = 64
 _SEGMENT_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 def validate_slug(name: str) -> str | None:
@@ -22,6 +27,10 @@ def validate_slug(name: str) -> str | None:
             return "name must not contain '.' or '..' as a segment"
         if not _SEGMENT_RE.match(seg):
             return f"invalid segment: {seg!r} (allowed: letters, digits, '.', '-', '_')"
+        if seg.endswith((".", " ")):
+            return "name segments must not end with a dot or space"
+        if seg.split(".", 1)[0].upper() in _WINDOWS_RESERVED:
+            return f"invalid Windows reserved name: {seg!r}"
 
 
     return None

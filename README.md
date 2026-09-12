@@ -1,78 +1,194 @@
 # VelaCode
 
-VelaCode 是一个基于 Python `asyncio` 的终端 AI 编程助手。它支持 Anthropic、OpenAI 与 OpenAI-Compatible 模型协议，并提供工具调用、MCP、Skills、权限控制、上下文压缩、Sub-Agent、Agent Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
+VelaCode 是一个面向真实软件工程任务的终端 AI 编程助手。它以 Python `asyncio`
+构建 Agent Runtime，支持多模型协议、工具调用、MCP、Skills、Sub-Agent、Agent
+Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
+
+项目重点不只是“调用模型完成一次任务”，还包括执行状态可追踪、进程中断后可恢复、
+副作用可判断以及长任务可接管的工程化运行时。
+
+## 核心能力
+
+- **多模型接入**：支持 Anthropic、OpenAI Responses 和 OpenAI-Compatible 协议。
+- **持久化执行控制面**：使用 SQLite 管理 Session、Run、Step、ToolCall、Task、
+  Event、Checkpoint、Result Artifact 以及 Team/Member 状态。
+- **安全恢复**：启动时扫描未完成执行，通过幂等键、文件状态检查和人工确认决定
+  重试、复用或停止。
+- **耐久后台任务**：支持依赖关系、lease、heartbeat、失败重试、worker 接管以及
+  全局和 Team 级并发控制。
+- **可组合工具系统**：Built-in、Plugin、MCP 和 Session 四层 Registry，配合
+  Skills、Hooks、权限规则和资源生命周期管理。
+- **多 Agent 协作**：支持 Sub-Agent、后台 Agent、Agent Team、结构化邮箱事件以及
+  Git Worktree 隔离。
+- **上下文与结果管理**：支持上下文压缩、可验证 Checkpoint、工具调用链对齐、
+  超长结果卸载和引用感知清理。
+- **可观测性**：模型、工具、权限、Hook、压缩、恢复和任务调度均可输出
+  OpenTelemetry Trace，默认对内容与密钥脱敏。
+- **跨平台安全执行**：macOS 使用 Seatbelt，Linux 使用 bubblewrap，Windows 使用
+  WSL2 + bubblewrap；启用但不可用时命令执行会 fail closed。
 
 ## 架构概览
 
 ```text
 Terminal UI / CLI / Remote
-           |
-           v
-       Agent Runtime ---- OpenTelemetry
-        |    |    |
-        |    |    +---- SQLite control plane
-        |    |          (Run / Step / ToolCall / Task / Event)
-        |    |
-        |    +--------- Layered Tool Registry
-        |               (Built-in < Plugin < MCP < Session)
-        |
-        +-------------- Provider adapters
-                        (Anthropic / OpenAI / Compatible)
+            |
+            v
+      Agent Runtime ---------------- OpenTelemetry
+       |      |      |
+       |      |      +-------------- Runtime Events
+       |      |
+       |      +--------------------- Layered Tool Registry
+       |                              | Permissions / Hooks
+       |                              | MCP / Skills / Tools
+       |
+       +---------------------------- Provider Adapters
+            |
+            +---- JSONL Session / Compact Checkpoint
+            +---- SQLite Control Plane
+                  Run / Step / ToolCall / Task / Event
+                  Artifact / Team / Member
 ```
 
-完整对话保存在 JSONL 中；SQLite 负责执行状态、检查点、任务 lease、attempt 和事件。对于崩溃时状态不确定的外部副作用，VelaCode 不承诺严格 exactly-once，而是通过幂等键、文件状态检查和人工确认降低重复执行风险。
+JSONL 保存完整对话，SQLite 保存可查询的执行状态和恢复索引。状态转换与对应事件在
+同一事务中提交；超长工具结果写入 Session/Run 隔离目录，并记录哈希、引用状态和
+清理终态。
 
-## 安装与启动
+## 快速开始
 
-需要 Python 3.11 或更高版本。推荐使用 `uv`：
+### 环境要求
+
+- Python 3.11+
+- 推荐使用 [uv](https://docs.astral.sh/uv/)
+- 至少一个可用的模型 API
+
+### 安装
 
 ```bash
+git clone https://github.com/Humble666661/ValeCode.git
+cd ValeCode
 uv sync
 ```
 
-复制环境变量模板并填写模型配置：
+### 配置模型
+
+复制环境变量模板：
 
 ```bash
 cp .env.example .env
 ```
 
-Windows PowerShell 可使用：
+Windows PowerShell：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-启动交互界面：
+填写协议、模型和 API Key：
+
+```dotenv
+VALECODE_PROVIDER_NAME=my-provider
+VALECODE_PROTOCOL=anthropic
+VALECODE_BASE_URL=https://api.anthropic.com
+VALECODE_MODEL=your-model-id
+ANTHROPIC_API_KEY=your-api-key
+```
+
+支持的协议值为 `anthropic`、`openai` 和 `openai-compat`。请勿提交包含真实密钥的
+`.env`、`.env.local` 或 `.valecode/config.local.yaml`。
+
+### 启动
+
+交互式终端界面：
 
 ```bash
 uv run valecode
 ```
 
-查看所有 CLI 参数：
+执行单次任务：
 
 ```bash
-uv run valecode --help
+uv run valecode -p "分析当前项目并给出测试建议"
 ```
 
-配置按用户级 `.env`、项目 `.env`、项目 `.env.local`、系统环境变量的顺序覆盖，系统环境变量优先级最高。不要提交真实 API Key。
+输出适合程序消费的 NDJSON 事件流：
 
-## 恢复与可观测性
+```bash
+uv run valecode -p "运行测试并总结失败原因" --output-format stream-json
+```
 
-VelaCode 启动时会扫描未完成 Run，将遗留状态收敛为可判断的恢复状态。已提交的工具结果按幂等键复用；只读调用可以安全重试；写文件调用会核对实际文件状态；无法确认的外部副作用标记为 `uncertain`，等待确认后继续。
+远程模式：
 
-如需本地 Trace，在 `.env` 中启用：
+```bash
+uv run valecode --remote
+```
+
+远程模式启动 WebSocket 服务和浏览器界面，默认监听 `0.0.0.0:18888`。请仅在
+可信网络或受控的反向代理之后使用该入口。
+
+## 配置层级
+
+VelaCode 同时支持 `.env` 和 YAML 配置。
+
+环境变量从低到高依次覆盖：
+
+1. `~/.valecode/.env`
+2. 项目 `.env`
+3. 项目 `.env.local`
+4. 进程或系统环境变量
+
+YAML 配置从低到高依次合并：
+
+1. `~/.valecode/config.yaml`
+2. 项目 `.valecode/config.yaml`
+3. 项目 `.valecode/config.local.yaml`
+
+单 Provider 场景可只使用 `.env`；多 Provider、MCP、Hooks、Worktree 和 Sandbox
+等配置适合放在 YAML 中。YAML 字符串支持 `${ENV_NAME}` 引用环境变量。
+
+## 常用交互命令
+
+- `/help`：查看所有可用命令。
+- `/session`：列出、恢复、新建或删除会话。
+- `/tasks`：查看和管理后台任务。
+- `/trace`：查看 Agent 父子追踪树。
+- `/permission`：查看或切换权限模式。
+- `/sandbox`：查看沙箱状态。
+- `/worktree`：管理 Git Worktree 会话。
+- `/mcp`、`/skill`：查看扩展能力。
+- `/compact`：主动压缩当前上下文。
+
+项目和用户还可以通过 `.valecode/commands/` 添加 Markdown 自定义命令。
+
+## 恢复与副作用语义
+
+VelaCode 在启动时扫描遗留 Run，并将未完成状态收敛为可恢复状态：
+
+- 已提交结果的工具调用按稳定幂等键复用；
+- 未开始或只读调用可以安全重试；
+- 文件写入会对照目标文件的实际内容；
+- 无法从本地状态确认的外部副作用标记为 `uncertain`，等待人工决策。
+
+这套机制明确区分可重试操作与外部副作用，不以本地数据库对 Shell、MCP 或网络
+请求作不可靠的严格 exactly-once 承诺。
+
+## OpenTelemetry
+
+启用本地 JSONL Trace：
 
 ```dotenv
 VALECODE_OTEL_ENABLED=true
 VALECODE_OTEL_EXPORTER=file
 VALECODE_OTEL_FILE=.valecode/traces.jsonl
+VALECODE_OTEL_SERVICE_NAME=valecode
 ```
 
-也可使用 `console` 或配置 OTLP/HTTP endpoint。Prompt、工具参数和输出默认脱敏。
+Exporter 也可设置为 `console` 或 `otlp`。使用 OTLP 时，通过
+`VALECODE_OTEL_ENDPOINT` 指定 HTTP endpoint。Prompt、工具参数和输出默认脱敏；
+密钥字段始终脱敏。
 
 ## OS 级沙箱
 
-可在 `.valecode/config.yaml` 启用：
+在 `.valecode/config.yaml` 中启用：
 
 ```yaml
 sandbox:
@@ -81,21 +197,19 @@ sandbox:
   network_enabled: false
 ```
 
-macOS 使用 Seatbelt，Linux 使用 bubblewrap，Windows 使用 WSL2 内的
-bubblewrap。Windows 默认 WSL 发行版需预先安装 `bubblewrap`；VelaCode 会实际
-探测 user/mount namespace，而不只检查命令是否存在。配置已启用但后端不可用时，
-Bash 会 fail closed 且不会执行命令；`auto_allow` 也只在后端探测成功后生效。
+VelaCode 会实际探测沙箱 namespace 是否可用。探测失败时不会静默退回宿主 Shell；
+`auto_allow` 仅在 OS 沙箱成功附加后对 Bash 生效。Windows 环境需要默认 WSL2
+发行版，并在该发行版中安装 `bubblewrap`。
 
-## 测试
+## 开发与测试
 
 ```bash
+uv sync --group dev
 uv run pytest -q
 ```
 
-测试覆盖数据库迁移与状态机、崩溃恢复、后台任务接管、模型重试、循环熔断、分层工具注册和 Trace 传播。
+当前回归基线为 **649 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
+Hooks、Worktree 边界、沙箱以及 Trace 传播。
 
-## 当前限制
-
-- 外部 Shell、MCP 和网络副作用无法仅靠本地数据库严格保证 exactly-once。
-- Windows 沙箱依赖可用的 WSL2 发行版与其中安装的 `bubblewrap`。
-- 跨进程恢复依赖持久化控制面中已有的最后安全检查点。
+仓库级开发约定见 [VALECODE.md](VALECODE.md)。

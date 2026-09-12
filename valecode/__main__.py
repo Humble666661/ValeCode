@@ -86,6 +86,7 @@ def main() -> None:
             providers=config.providers,
             mcp_servers=config.mcp_servers,
             hook_engine=hook_engine,
+            sandbox_config=config.sandbox,
         )
         asyncio.run(server.run())
         return
@@ -180,6 +181,18 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     registry = create_default_registry()
     registry.bind_session(session.session_id)
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
+    if config.sandbox.enabled:
+        from valecode.sandbox import attach_sandbox
+
+        attached, reason = attach_sandbox(
+            registry,
+            checker,
+            work_dir,
+            network_enabled=config.sandbox.network_enabled,
+            auto_allow=config.sandbox.auto_allow,
+        )
+        if not attached:
+            logging.warning("OS sandbox requested but unavailable: %s", reason)
 
     agent = Agent(
         client=client,

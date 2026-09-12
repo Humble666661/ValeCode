@@ -10,8 +10,10 @@ macOS 使用 sandbox-exec（Seatbelt），Linux 使用 bubblewrap（bwrap）。
 from __future__ import annotations
 
 import platform
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -45,7 +47,7 @@ def create_sandbox() -> Sandbox | None:
 
     macOS -> SeatbeltSandbox（基于 sandbox-exec）
     Linux -> BwrapSandbox（基于 bubblewrap）
-    其他系统 -> None（不支持沙箱）
+    Windows -> WslBwrapSandbox（基于 WSL2 + bubblewrap）
     """
     system = platform.system()
     if system == "Darwin":
@@ -54,4 +56,42 @@ def create_sandbox() -> Sandbox | None:
     elif system == "Linux":
         from .bwrap import BwrapSandbox
         return BwrapSandbox()
+    elif system == "Windows":
+        from .wsl import WslBwrapSandbox
+        return WslBwrapSandbox()
     return None
+
+
+def attach_sandbox(
+    registry: object,
+    checker: object,
+    work_dir: str,
+    *,
+    network_enabled: bool = False,
+    auto_allow: bool = False,
+) -> tuple[bool, str]:
+    """Attach a verified backend and enable auto-allow only after verification."""
+    sandbox = create_sandbox()
+    if sandbox is None:
+        return False, "no sandbox backend exists for this platform"
+    bash_tool = getattr(registry, "get")("Bash")
+    if bash_tool is None:
+        return False, "Bash tool is not registered"
+    bash_tool.sandbox = sandbox
+    bash_tool.sandbox_config = SandboxConfig(
+        allow_write=[work_dir, tempfile.gettempdir()],
+        deny_write=[
+            str(Path(work_dir) / ".valecode" / "config.yaml"),
+            str(Path(work_dir) / ".valecode" / "permissions.local.yaml"),
+        ],
+        network_enabled=network_enabled,
+    )
+    if not sandbox.available():
+        # Keep the configured backend attached so Bash fails closed instead of
+        # silently executing outside the sandbox requested by the user.
+        if checker is not None:
+            checker.sandbox_enabled = False
+        return False, f"sandbox backend {type(sandbox).__name__} is unavailable"
+    if checker is not None:
+        checker.sandbox_enabled = auto_allow
+    return True, type(sandbox).__name__

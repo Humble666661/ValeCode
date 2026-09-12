@@ -689,9 +689,6 @@ class VelaCodeApp(App):
         home = Path.home()
 
         # 根据配置决定是否启用 OS 级沙箱自动放行
-        sandbox_auto_allow = (
-            self._sandbox_cfg.enabled and self._sandbox_cfg.auto_allow
-        )
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(work_dir),
@@ -701,26 +698,23 @@ class VelaCodeApp(App):
                 local_rules_path=Path(work_dir) / ".valecode" / "permissions.local.yaml",
             ),
             mode=self._initial_permission_mode,
-            sandbox_enabled=sandbox_auto_allow,
+            # Set only after a usable OS backend has actually been attached.
+            sandbox_enabled=False,
         )
 
         # 如果配置启用了沙箱，为 Bash 工具挂载 OS 沙箱
         if self._sandbox_cfg.enabled:
-            from valecode.sandbox import SandboxConfig, create_sandbox
-            os_sandbox = create_sandbox()
-            if os_sandbox and os_sandbox.available():
-                sandbox_config = SandboxConfig(
-                    allow_write=[work_dir, "/tmp"],
-                    deny_write=[
-                        f"{work_dir}/.valecode/config.yaml",
-                        f"{work_dir}/.valecode/permissions.local.yaml",
-                    ],
-                    network_enabled=self._sandbox_cfg.network_enabled,
-                )
-                bash_tool = self.registry.get("Bash")
-                if bash_tool:
-                    bash_tool.sandbox = os_sandbox
-                    bash_tool.sandbox_config = sandbox_config
+            from valecode.sandbox import attach_sandbox
+
+            attached, reason = attach_sandbox(
+                self.registry,
+                checker,
+                work_dir,
+                network_enabled=self._sandbox_cfg.network_enabled,
+                auto_allow=self._sandbox_cfg.auto_allow,
+            )
+            if not attached:
+                log.warning("OS sandbox requested but unavailable: %s", reason)
 
         self._instructions_content = load_instructions(work_dir)
         self.memory_manager = MemoryManager(work_dir)

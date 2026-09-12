@@ -126,11 +126,20 @@ class Bash(Tool):
         timeout = min(params.timeout, MAX_TIMEOUT)
 
         # 如果启用了 OS 沙箱，将命令包装为沙箱内执行
-        actual_command = params.command
-        if self.sandbox and self.sandbox_config and self.sandbox.available():
-            actual_command = self.sandbox.wrap(params.command, self.sandbox_config)
-
         try:
+            actual_command = params.command
+            if self.sandbox and self.sandbox_config:
+                if not self.sandbox.available():
+                    return ToolResult(
+                        output=(
+                            "Error: OS sandbox is configured but its backend is "
+                            "unavailable; command was not executed"
+                        ),
+                        is_error=True,
+                    )
+                actual_command = self.sandbox.wrap(
+                    params.command, self.sandbox_config
+                )
             proc = await asyncio.create_subprocess_shell(
                 actual_command,
                 stdout=asyncio.subprocess.PIPE,
@@ -162,4 +171,3 @@ class Bash(Tool):
             output = "(no output)"
 
         return ToolResult(output=output, is_error=False)
-

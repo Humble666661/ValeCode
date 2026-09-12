@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import pytest
@@ -656,6 +657,21 @@ async def test_e2e_user_denies_operation():
 # ===========================================================================
 
 class TestSandboxAutoAllowRespectsDenyAsk:
+    def test_non_bash_command_tool_is_not_auto_allowed(self) -> None:
+        tmpdir = Path(tempfile.mkdtemp())
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(str(tmpdir)),
+            rule_engine=RuleEngine(),
+            mode=PermissionMode.DEFAULT,
+            sandbox_enabled=True,
+        )
+        tool = SimpleNamespace(permission_name="Agent", category="command")
+
+        decision = checker.check(tool, {"prompt": "change external state"})
+
+        assert decision.effect == "ask"
+
     def test_compound_command_deny(self) -> None:
         tmpdir = Path(tempfile.mkdtemp())
         rules_file = tmpdir / "rules.yaml"

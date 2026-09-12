@@ -40,7 +40,7 @@ from valecode.client import create_client, resolve_context_window
 from valecode.commands import CommandContext, CommandRegistry, CommandType
 from valecode.commands.handlers import register_all_commands
 from valecode.commands.parser import parse_command
-from valecode.config import MCPServerConfig, ProviderConfig
+from valecode.config import MCPServerConfig, ProviderConfig, SandboxAppConfig
 from valecode.conversation import ConversationManager
 from valecode.hooks import HookEngine
 from valecode.mcp import MCPManager
@@ -72,12 +72,14 @@ class RemoteServer:
         hook_engine: HookEngine | None = None,
         addr: str = "0.0.0.0",
         port: int = 18888,
+        sandbox_config: SandboxAppConfig | None = None,
     ) -> None:
         self.providers = providers
         self._mcp_server_configs = mcp_servers or []
         self.hook_engine = hook_engine
         self.addr = addr
         self.port = port
+        self._sandbox_config = sandbox_config or SandboxAppConfig()
 
         # WebSocket 连接池（支持多客户端广播）
         self._connections: set[ServerConnection] = set()
@@ -248,6 +250,18 @@ class RemoteServer:
         self.registry = create_default_registry()
         self.registry.bind_session(self.session_id)
         self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
+        if self._sandbox_config.enabled:
+            from valecode.sandbox import attach_sandbox
+
+            attached, reason = attach_sandbox(
+                self.registry,
+                checker,
+                work_dir,
+                network_enabled=self._sandbox_config.network_enabled,
+                auto_allow=self._sandbox_config.auto_allow,
+            )
+            if not attached:
+                log.warning("OS sandbox requested but unavailable: %s", reason)
 
         # Skill 加载
         self.skill_loader = SkillLoader(work_dir)

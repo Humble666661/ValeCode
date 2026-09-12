@@ -131,7 +131,14 @@ class PermissionChecker:
         # 内核级隔离会阻止越权写入，无需再弹确认。
         # 对齐 Claude Code checkSandboxAutoAllow：拆分复合命令逐条检查，
         # deny 规则和 ask 规则不受沙箱影响。
-        if self.sandbox_enabled and tool.category == "command":
+        # Only Bash is executed through the attached OS backend.  Other
+        # command-category tools (Agent, Team, Worktree, mailbox, tasks) must
+        # continue through their normal permission rules.
+        if (
+            self.sandbox_enabled
+            and tool.category == "command"
+            and permission_name == "Bash"
+        ):
             import re
             subcommands = [s.strip() for s in re.split(r'\s*(?:&&|\|\||[;|])\s*', content) if s.strip()]
             if not subcommands:

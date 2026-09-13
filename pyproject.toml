@@ -1,8 +1,25 @@
 [project]
 name = "valecode"
 version = "0.2.0"
-description = "A terminal AI coding assistant"
+description = "A recoverable and observable terminal AI coding assistant"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Humble666661" },
+]
+keywords = ["ai", "agent", "coding-assistant", "terminal", "tui"]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "textual>=2.1.0",
     "anthropic>=0.42.0",
@@ -20,6 +37,11 @@ dependencies = [
 
 [project.scripts]
 valecode = "valecode.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Humble666661/ValeCode"
+Repository = "https://github.com/Humble666661/ValeCode.git"
+Issues = "https://github.com/Humble666661/ValeCode/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["valecode"]

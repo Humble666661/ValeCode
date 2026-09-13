@@ -228,3 +228,7 @@ uv run pytest -q
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 
 仓库级开发约定见 [VALECODE.md](VALECODE.md)。
+
+## 许可证
+
+ValeCode 采用 [MIT License](LICENSE) 开源。

@@ -76,6 +76,7 @@ from valecode.skills.loader import SkillLoader
 from valecode.commands.handlers.skill_register import register_skill_commands
 from rich.text import Text as RichText
 from textual.theme import Theme
+from valecode import __version__
 from valecode.cache import FileCache
 from valecode.tools import ToolRegistry, create_default_registry
 from valecode.tools.agent_tool import AgentTool
@@ -353,6 +354,13 @@ def _format_detail(tool_name: str, arguments: dict[str, Any], output: str) -> st
     return "\n".join(parts)
 
 
+def _make_assistant_label() -> Static:
+    label = RichText()
+    label.append("◆ ", style="bold #FAB283")
+    label.append("VelaCode", style="bold #EEEEEE")
+    return Static(label, classes="message assistant-label")
+
+
 class ToolCallBlock(Static, can_focus=True):
 
     def __init__(self, tool_name: str, arguments: dict[str, Any], **kwargs: Any) -> None:
@@ -368,7 +376,7 @@ class ToolCallBlock(Static, can_focus=True):
         self._render_loading()
 
     def _render_loading(self) -> None:
-        self.update(f"  ● {self._title} …")
+        self.update(f"◇  {self._title} …")
         self.add_class("tool-block-loading")
 
     def set_result(self, output: str, is_error: bool, elapsed: float) -> None:
@@ -384,15 +392,15 @@ class ToolCallBlock(Static, can_focus=True):
 
     def _render_collapsed(self) -> None:
         if self._is_error:
-            self.update(f"  ✗ {self._title} ({self._elapsed:.1f}s)")
+            self.update(f"×  {self._title}  ·  {self._elapsed:.1f}s")
         else:
-            self.update(f"  ✓ {self._title} ({self._elapsed:.1f}s)")
+            self.update(f"✓  {self._title}  ·  {self._elapsed:.1f}s")
 
     def _render_expanded(self) -> None:
         if self._is_error:
-            header = f"  ✗ {self._title} ({self._elapsed:.1f}s)"
+            header = f"×  {self._title}  ·  {self._elapsed:.1f}s"
         else:
-            header = f"  ✓ {self._title} ({self._elapsed:.1f}s)"
+            header = f"✓  {self._title}  ·  {self._elapsed:.1f}s"
         detail = _format_detail(self.tool_name, self._arguments, self._full_output)
         self.update(f"{header}\n{detail}")
 
@@ -414,10 +422,10 @@ _MODE_CYCLE = [
 ]
 
 _MODE_COLORS = {
-    PermissionMode.DEFAULT: "dim",
-    PermissionMode.ACCEPT_EDITS: "green",
-    PermissionMode.PLAN: "yellow",
-    PermissionMode.BYPASS: "red",
+    PermissionMode.DEFAULT: "#808080",
+    PermissionMode.ACCEPT_EDITS: "#7FD88F",
+    PermissionMode.PLAN: "#E5C07B",
+    PermissionMode.BYPASS: "#E06C75",
 }
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -464,7 +472,7 @@ class ToolGroupSummary(Static, can_focus=True):
 
 
     def __init__(self, count: int, total_elapsed: float, **kwargs: Any) -> None:
-        label = f"● Done ({count} tool uses · {total_elapsed:.1f}s)  (ctrl+o to expand)"
+        label = f"✓  {count} tools  ·  {total_elapsed:.1f}s  ·  ctrl+o details"
         super().__init__(label, **kwargs)
         self._count = count
         self._total = total_elapsed
@@ -472,11 +480,11 @@ class ToolGroupSummary(Static, can_focus=True):
 
     def _refresh_display(self) -> None:
         if self._expanded:
-            self.update(f"▼ Done ({self._count} tool uses · {self._total:.1f}s)")
+            self.update(f"▾  {self._count} tools  ·  {self._total:.1f}s")
         else:
             self.update(
-                f"● Done ({self._count} tool uses · {self._total:.1f}s)"
-                "  (ctrl+o to expand)"
+                f"✓  {self._count} tools  ·  {self._total:.1f}s"
+                "  ·  ctrl+o details"
             )
 
     def toggle(self) -> None:
@@ -504,7 +512,8 @@ class SubAgentBlock(Static, can_focus=True):
 
     def _render_running(self) -> None:
         desc = f"({self._description})" if self._description else ""
-        self.update(f"● {self._agent_type}{desc}\n     Running…")
+        subject = f"{self._agent_type} {desc}".rstrip()
+        self.update(f"◇  {subject}\n   └─ running…")
 
     def set_result(self, output: str, is_error: bool, elapsed: float) -> None:
         self._done = True
@@ -522,17 +531,18 @@ class SubAgentBlock(Static, can_focus=True):
 
     def _render_done(self) -> None:
         desc = f"({self._description})" if self._description else ""
+        subject = f"{self._agent_type} {desc}".rstrip()
         tool_info = f"{self._tool_count} tool uses · " if self._tool_count else ""
         if self._collapsed:
             self.update(
-                f"● {self._agent_type}{desc}\n"
-                f"    ⎿  Done ({tool_info}{self._elapsed:.1f}s)  (ctrl+o to expand)"
+                f"◆  {subject}\n"
+                f"   └─ done · {tool_info}{self._elapsed:.1f}s · ctrl+o details"
             )
         else:
             self.update(
-                f"● {self._agent_type}{desc}\n"
-                f"    ⎿  Done ({tool_info}{self._elapsed:.1f}s)\n"
-                f"  {self._result_preview}"
+                f"◆  {subject}\n"
+                f"   └─ done · {tool_info}{self._elapsed:.1f}s\n"
+                f"   {self._result_preview}"
             )
 
     def on_click(self) -> None:
@@ -544,10 +554,17 @@ class SubAgentBlock(Static, can_focus=True):
 
 _VALECODE_THEME = Theme(
     name="valecode",
-    primary="#875FFF",
-    background="#1a1a1a",
-    surface="#1a1a1a",
-    panel="#1a1a1a",
+    primary="#FAB283",
+    secondary="#5C9CF5",
+    accent="#9D7CD8",
+    warning="#E5C07B",
+    error="#E06C75",
+    success="#7FD88F",
+    foreground="#EEEEEE",
+    background="#0A0A0A",
+    surface="#141414",
+    panel="#1E1E1E",
+    boost="#282828",
     dark=True,
 )
 
@@ -636,14 +653,24 @@ class VelaCodeApp(App):
         self._has_exited_plan_mode: bool = False
 
     @staticmethod
-    def _make_banner(model: str = "", work_dir: str = "") -> RichText:
+    def _make_banner(
+        model: str = "", work_dir: str = "", provider: str = ""
+    ) -> RichText:
         t = RichText()
-        t.append(" /\\_/\\    ", style="bold color(99)")
-        t.append("VelaCode v0.1.0\n", style="color(242)")
-        t.append("( o.o )   ", style="bold color(99)")
-        t.append(f"{model}\n" if model else "\n", style="color(242)")
-        t.append(" > ^ <    ", style="bold color(99)")
-        t.append(work_dir, style="color(242)")
+        t.append("◆ ", style="bold #FAB283")
+        t.append("VelaCode", style="bold #EEEEEE")
+        t.append(f"  v{__version__}\n", style="#606060")
+        t.append("  ")
+        if model:
+            if provider:
+                t.append(provider, style="#808080")
+                t.append(" / ", style="#484848")
+            t.append(model, style="bold #D8D8D8")
+            if work_dir:
+                t.append("  ·  ", style="#484848")
+                t.append(work_dir, style="#808080")
+        else:
+            t.append("Select a provider to begin", style="#808080")
         return t
 
     def compose(self) -> ComposeResult:
@@ -663,8 +690,12 @@ class VelaCodeApp(App):
         with Vertical(id="input-area"):
             yield ChatInput(id="chat-input")
             with Horizontal(id="status-bar"):
-                yield Static("  default", id="mode-label")
+                yield Static("● default", id="mode-label")
                 yield Static("", id="teammates-label")
+                yield Static(
+                    "enter send  ·  shift+enter newline  ·  / commands",
+                    id="shortcut-label",
+                )
                 yield Static("", id="model-label")
             yield CompletionPopup()
 
@@ -939,7 +970,7 @@ class VelaCodeApp(App):
         self.query_one("#model-label", Static).update(provider.model)
         work_dir = os.getcwd()
         self.query_one("#title-bar", Static).update(
-            self._make_banner(provider.model, work_dir)
+            self._make_banner(provider.model, work_dir, provider.name)
         )
         self._update_mode_label()
 
@@ -949,7 +980,7 @@ class VelaCodeApp(App):
         self.query_one("#chat-area").display = True
         self.query_one("#input-area").display = True
         chat_input = self.query_one("#chat-input", ChatInput)
-        chat_input.placeholder = "Send a message..."
+        chat_input.placeholder = "Ask VelaCode anything…"
         chat_input.load_history(work_dir)
         chat_input.focus()
 
@@ -1310,8 +1341,8 @@ class VelaCodeApp(App):
             await chat.mount(user_row)
             from rich.text import Text as RichText
             user_rich = RichText()
-            user_rich.append("❯ ", style="bold color(80)")
-            user_rich.append(text, style="bold color(255)")
+            user_rich.append("›  ", style="bold #FAB283")
+            user_rich.append(text, style="bold #EEEEEE")
             user_bubble = Static(user_rich, classes="message user-message")
             await user_row.mount(user_bubble)
             self.call_after_refresh(chat.scroll_end, animate=False)
@@ -1334,6 +1365,7 @@ class VelaCodeApp(App):
         # 准备 AI 回复区域
         ai_row = Vertical(classes="ai-row")
         await chat.mount(ai_row)
+        await ai_row.mount(_make_assistant_label())
         streaming_label = Static("", classes="message ai-message")
         await ai_row.mount(streaming_label)
 
@@ -1345,7 +1377,7 @@ class VelaCodeApp(App):
         self._thinking_verb = random.choice(THINKING_VERBS)
         self._spinner_idx = 0
         self._spinner_label = Static(
-            f"  {SPINNER_FRAMES[0]} {self._thinking_verb}…",
+            f"{SPINNER_FRAMES[0]}  {self._thinking_verb}…",
             id="spinner-live",
         )
         await chat.mount(self._spinner_label)
@@ -1374,7 +1406,6 @@ class VelaCodeApp(App):
                     accumulated_text += event.text
                     from rich.text import Text as RichText
                     t = RichText()
-                    t.append("● ", style="bold color(99)")
                     t.append(accumulated_text)
                     streaming_label.update(t)
                     self.call_after_refresh(chat.scroll_end, animate=False)
@@ -1386,9 +1417,6 @@ class VelaCodeApp(App):
                     if accumulated_text:
                         if streaming_label is not None:
                             await streaming_label.remove()
-                        from rich.text import Text as RichText
-                        prefix = Static(RichText("●  ", style="bold color(99)"), classes="message")
-                        await ai_row.mount(prefix)
                         md = Markdown(accumulated_text, classes="message ai-message")
                         await ai_row.mount(md)
                         streaming_label = None
@@ -1451,6 +1479,7 @@ class VelaCodeApp(App):
                     tool_blocks.clear()
                     ai_row = Vertical(classes="ai-row")
                     await chat.mount(ai_row)
+                    await ai_row.mount(_make_assistant_label())
                     streaming_label = Static("", classes="message ai-message")
                     await ai_row.mount(streaming_label)
                     accumulated_text = ""
@@ -1710,7 +1739,7 @@ class VelaCodeApp(App):
         elapsed = _time.monotonic() - self._thinking_start
         if self._spinner_label is not None:
             self._spinner_label.update(
-                f"  {frame} {self._thinking_verb}…  ({elapsed:.0f}s)"
+                f"{frame}  {self._thinking_verb}…  ·  {elapsed:.0f}s"
             )
             if self._spinner_idx % 5 == 0:
                 try:
@@ -1762,7 +1791,13 @@ class VelaCodeApp(App):
         try:
             label = self.query_one("#teammates-label", Static)
             if count > 0:
-                label.update(f"[cyan]● {count} teammate{'s' if count != 1 else ''}[/cyan]  ")
+                value = RichText()
+                value.append("● ", style="bold #5C9CF5")
+                value.append(
+                    f"{count} teammate{'s' if count != 1 else ''}",
+                    style="#D8D8D8",
+                )
+                label.update(value)
             else:
                 label.update("")
         except Exception:
@@ -1819,13 +1854,14 @@ class VelaCodeApp(App):
                 row = Vertical(classes="user-row")
                 await chat.mount(row)
                 user_rich = RichText()
-                user_rich.append("❯ ", style="bold color(80)")
-                user_rich.append(msg.content, style="bold color(255)")
+                user_rich.append("›  ", style="bold #FAB283")
+                user_rich.append(msg.content, style="bold #EEEEEE")
                 bubble = Static(user_rich, classes="message user-message")
                 await row.mount(bubble)
             elif msg.role == "assistant":
                 row = Vertical(classes="ai-row")
                 await chat.mount(row)
+                await row.mount(_make_assistant_label())
                 md = Markdown(msg.content, classes="message ai-message")
                 await row.mount(md)
 
@@ -1982,13 +2018,13 @@ class VelaCodeApp(App):
 
     def _show_error(self, text: str) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
-        error_widget = Static(f"✖ {text}", classes="message error-message")
+        error_widget = Static(f"×  {text}", classes="message error-message")
         chat.mount(error_widget)
         self.call_after_refresh(chat.scroll_end, animate=False)
 
     def _show_system_message(self, text: str) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
-        msg = Static(f"  {text}", classes="message system-message")
+        msg = Static(f"·  {text}", classes="message system-message")
         chat.mount(msg)
         self.call_after_refresh(chat.scroll_end, animate=False)
 
@@ -2003,19 +2039,23 @@ class VelaCodeApp(App):
         if self.agent:
             perm = self.agent.permission_mode
             display = self._MODE_DISPLAY.get(perm, perm.value)
-            color = _MODE_COLORS.get(perm, "dim")
+            color = _MODE_COLORS.get(perm, "#808080")
             label = self.query_one("#mode-label", Static)
-            if perm == PermissionMode.DEFAULT:
-                label.update(f"[{color}]{display}[/{color}]")
-            else:
-                label.update(f"[{color}]{display}[/{color}]  (shift+tab to cycle)")
+            value = RichText()
+            value.append("● ", style=f"bold {color}")
+            value.append(display, style="bold #D8D8D8")
+            label.update(value)
         try:
             model_label = self.query_one("#model-label", Static)
-            model_text = self._selected_provider.model if self._selected_provider else ""
+            provider = self._selected_provider
+            value = RichText()
             if self._mcp_connecting:
-                model_label.update(f"[yellow]MCP connecting…[/yellow]  {model_text}")
-            else:
-                model_label.update(model_text)
+                value.append("◇ MCP  ", style="#E5C07B")
+            if provider is not None:
+                value.append(provider.name, style="#808080")
+                value.append(" / ", style="#484848")
+                value.append(provider.model, style="#D8D8D8")
+            model_label.update(value)
         except Exception:
             pass
 

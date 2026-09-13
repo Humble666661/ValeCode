@@ -26,8 +26,8 @@ class TeammateTree(Widget):
 
         lines = Text()
         # Leader line
-        lines.append("  ┌─ ", style="dim")
-        lines.append("team-lead", style="cyan")
+        lines.append("  ◆ ", style="bold #FAB283")
+        lines.append("team-lead", style="#D8D8D8")
         lines.append(": thinking…", style="dim")
         if self.leader_tokens > 0:
             lines.append(
@@ -41,7 +41,7 @@ class TeammateTree(Widget):
             connector = "  └─ " if is_last else "  ├─ "
 
             lines.append(connector, style="dim")
-            lines.append(f"@{p.name}", style="cyan")
+            lines.append(f"@{p.name}", style="#5C9CF5")
             lines.append(": ")
 
             if p.status == "completed":

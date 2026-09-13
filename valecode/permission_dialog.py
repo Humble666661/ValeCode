@@ -52,14 +52,14 @@ class InlinePermissionWidget(Vertical, can_focus=True):
 
     def _build_content(self) -> str:
         lines = []
-        lines.append(f"\n  [bold yellow]{self._tool_name} command[/bold yellow]\n")
+        lines.append(f"\n  [bold #E5C07B]{self._tool_name} command[/bold #E5C07B]\n")
         lines.append(f"    {self._description}\n")
         lines.append("  [dim]This command requires approval[/dim]\n")
         lines.append("  Do you want to proceed?\n")
 
         for i, (label, _resp) in enumerate(_PERM_OPTIONS):
             if i == self._cursor:
-                lines.append(f" [bold cyan]❯[/bold cyan] {i + 1}. [bold]{label}[/bold]")
+                lines.append(f" [bold #FAB283]❯[/bold #FAB283] {i + 1}. [bold]{label}[/bold]")
             else:
                 lines.append(f"   {i + 1}. [dim]{label}[/dim]")
 

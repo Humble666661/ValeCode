@@ -83,7 +83,7 @@ class InlineResumeWidget(Vertical, can_focus=True):
         for i, meta in enumerate(self._filtered[:10]):  # 最多显示 10 条
             title = meta.title or "(empty session)"
             if i == self._cursor:
-                lines.append(f"[bold cyan]❯[/] [bold]{title}[/]")
+                lines.append(f"[bold #FAB283]❯[/] [bold]{title}[/]")
             else:
                 lines.append(f"  {title}")
 

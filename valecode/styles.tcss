@@ -1,144 +1,226 @@
-Screen { }
+Screen {
+    background: #0A0A0A;
+    color: #EEEEEE;
+}
+
+/* --- Brand header -------------------------------------------------- */
 
 #title-bar {
     dock: top;
     width: 100%;
-    height: 3;
-    padding: 0 1;
+    height: 4;
+    padding: 0 3;
+    background: #0A0A0A;
+    border-bottom: solid #282828;
+    content-align: left middle;
+    overflow: hidden;
 }
 
-/* --- Provider Selection --- */
+/* --- Provider selection ------------------------------------------- */
 
 #provider-select {
     align: center middle;
     width: 100%;
     height: 1fr;
+    background: #0A0A0A;
 }
 
 #select-label {
-    text-align: center;
     width: 100%;
     height: auto;
     margin-top: 2;
+    color: #EEEEEE;
+    text-align: center;
     text-style: bold;
 }
 
 #provider-list {
-    width: 60;
+    width: 64;
     height: auto;
     max-height: 16;
     margin: 1 2;
+    padding: 0 1;
+    background: #141414;
+    border: tall #323232;
 }
 
-/* --- Chat Area --- */
+#provider-list:focus {
+    border: tall #FAB283;
+}
+
+/* --- Conversation ------------------------------------------------- */
 
 #chat-area {
     height: 1fr;
-    min-height: 18;
-    padding: 0 1;
+    min-height: 16;
+    padding: 1 3 2 3;
+    background: #0A0A0A;
+    scrollbar-size: 1 1;
+    scrollbar-color: #484848;
+    scrollbar-color-hover: #606060;
+    scrollbar-background: #0A0A0A;
 }
 
 .message {
-    padding: 0 2;
-    margin: 0;
     width: 100%;
     height: auto;
 }
 
 .user-row {
-    height: auto;
     width: 100%;
+    height: auto;
+    margin: 1 0;
 }
 
 .user-message {
-    color: $text;
+    width: 100%;
+    padding: 0 1;
+    color: #EEEEEE;
+    background: #1E1E1E;
+    border-left: thick #FAB283;
 }
 
 .ai-row {
-    height: auto;
     width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+.assistant-label {
+    height: 1;
+    padding: 0 1;
+    color: #FAB283;
 }
 
 .ai-message {
-    color: $text;
+    width: 100%;
+    padding: 0 2 0 3;
+    color: #EEEEEE;
+    background: transparent;
 }
 
 .error-message {
-    color: $error;
-    padding: 0 2;
+    margin: 1 2;
+    padding: 0 1;
+    color: #E06C75;
+    background: #1B1113;
+    border-left: thick #E06C75;
 }
 
 .system-message {
-    color: $text-muted;
-    padding: 0 2;
+    margin: 0 2;
+    padding: 0 1;
+    color: #808080;
+    border-left: thick #282828;
 }
 
-/* --- Tool Call Block --- */
+/* --- Tool calls --------------------------------------------------- */
 
 .tool-block {
-    padding: 0 2;
     width: auto;
     height: auto;
-    color: $text;
+    margin: 0 2 0 3;
+    padding: 0 1;
+    color: #D8D8D8;
+    background: #141414;
+    border-left: thick #323232;
+}
+
+.tool-block:hover,
+.tool-block:focus {
+    background: #1E1E1E;
+    border-left: thick #606060;
 }
 
 .tool-block-loading {
-    color: $text-muted;
+    color: #E5C07B;
+    border-left: thick #E5C07B;
 }
 
 .tool-block-error {
-    color: $error;
+    color: #E06C75;
+    background: #1B1113;
+    border-left: thick #E06C75;
 }
 
-/* --- Thinking Display --- */
-
-.thinking-done {
-    color: $text-muted;
-    text-style: italic;
+.tool-group-summary {
+    color: #7FD88F;
+    border-left: thick #7FD88F;
 }
-
-/* --- Sub-Agent Block --- */
 
 .subagent-block {
-    color: $text;
-    padding: 0 2;
+    color: #D8D8D8;
+    border-left: thick #5C9CF5;
 }
 
-/* --- Input Area --- */
+/* --- Thinking and team progress ---------------------------------- */
 
 #spinner-live {
     height: 1;
-    padding: 0 2;
+    margin: 0 2;
+    padding: 0 1;
+    color: #FAB283;
 }
+
+.thinking-done {
+    margin: 0 2;
+    padding: 0 1;
+    color: #808080;
+    text-style: italic;
+}
+
+#teammate-tree {
+    height: auto;
+    margin: 0 2;
+    padding: 0 1;
+    color: #A8A8A8;
+}
+
+/* --- Composer ----------------------------------------------------- */
 
 #input-area {
     dock: bottom;
     height: auto;
     max-height: 20;
-    padding: 0 1;
-    border-top: solid #303030;
+    padding: 1 2 0 2;
+    background: #0A0A0A;
+    border-top: solid #282828;
 }
 
 #chat-input {
+    width: 100%;
     height: auto;
-    min-height: 1;
-    max-height: 10;
-    border: none;
+    min-height: 3;
+    max-height: 11;
+    padding: 0 1;
+    color: #EEEEEE;
+    background: #141414;
+    border: tall #323232;
+}
+
+#chat-input:focus {
+    background: #141414;
+    border: tall #FAB283;
+}
+
+#chat-input:disabled {
+    color: #606060;
+    border: tall #282828;
 }
 
 #status-bar {
-    height: auto;
-    min-height: 1;
     width: 100%;
+    height: 1;
+    min-height: 1;
     padding: 0 1;
-    border-top: solid #303030;
+    background: #0A0A0A;
 }
 
 #mode-label {
     width: auto;
     height: 1;
-    color: $text-muted;
-    padding: 0 1;
+    padding: 0 1 0 0;
+    color: #A8A8A8;
 }
 
 #teammates-label {
@@ -147,38 +229,56 @@ Screen { }
     padding: 0 1;
 }
 
-#model-label {
+#shortcut-label {
     width: 1fr;
     height: 1;
-    text-align: right;
-    color: $text-muted;
-}
-
-/* --- Teammate Tree --- */
-
-#teammate-tree {
-    height: auto;
-    padding: 0 2;
-}
-
-/* --- Plan Approval Dialog --- */
-
-PlanApprovalDialog {
-    align: center middle;
-}
-
-#plan-dialog {
-    width: 64;
-    height: auto;
-    padding: 1 2;
-    background: $surface;
-    border: solid $warning;
-}
-
-#plan-title {
-    text-style: bold;
+    color: #606060;
     text-align: center;
+}
+
+#model-label {
+    width: auto;
+    height: 1;
+    padding: 0 0 0 1;
+    color: #A8A8A8;
+    text-align: right;
+}
+
+CompletionPopup {
+    height: auto;
+    max-height: 8;
+    margin: 0 1;
+    padding: 0 1;
+    color: #D8D8D8;
+    background: #1E1E1E;
+    border: tall #484848;
+}
+
+/* --- Dialogs ------------------------------------------------------ */
+
+PlanApprovalDialog,
+AskUserDialog {
+    align: center middle;
+    background: #0A0A0A 70%;
+}
+
+#plan-dialog,
+#askuser-dialog {
+    width: 68;
+    height: auto;
+    max-height: 22;
+    padding: 1 2;
+    color: #EEEEEE;
+    background: #141414;
+    border: tall #FAB283;
+}
+
+#plan-title,
+#askuser-title {
     padding: 0 0 1 0;
+    color: #FAB283;
+    text-align: center;
+    text-style: bold;
 }
 
 #plan-dialog Button {
@@ -186,73 +286,27 @@ PlanApprovalDialog {
     margin: 0 0 1 0;
 }
 
-/* --- AskUser Dialog --- */
-
-AskUserDialog {
-    align: center middle;
-}
-
-#askuser-dialog {
-    width: 64;
-    height: auto;
-    max-height: 20;
-    padding: 1 2;
-    background: $surface;
-    border: solid $accent;
-}
-
-#askuser-title {
-    text-style: bold;
-    text-align: center;
-    padding: 0 0 1 0;
-}
-
 #askuser-options {
     height: auto;
     max-height: 12;
 }
 
-/* --- Inline Permission Widget --- */
+/* --- Inline interaction widgets --------------------------------- */
 
-#perm-inline {
-    height: auto;
-    padding: 0 0;
-    margin: 0 0;
-}
-
-#perm-content {
-    padding: 0 0;
-}
-
-/* --- Inline Plan Widget --- */
-
-#plan-inline {
-    height: auto;
-    padding: 0 0;
-}
-
-#plan-content {
-    padding: 0 0;
-}
-
-/* --- Inline AskUser Widget --- */
-
-#askuser-inline {
-    height: auto;
-    padding: 0 0;
-}
-
-#askuser-content {
-    padding: 0 0;
-}
-
-/* --- Inline Resume Widget --- */
-
+#perm-inline,
+#plan-inline,
+#askuser-inline,
 #resume-inline {
     height: auto;
-    padding: 0 0;
+    margin: 1 2;
+    padding: 1;
+    background: #141414;
+    border-left: thick #FAB283;
 }
 
+#perm-content,
+#plan-content,
+#askuser-content,
 #resume-content {
-    padding: 0 0;
+    padding: 0;
 }

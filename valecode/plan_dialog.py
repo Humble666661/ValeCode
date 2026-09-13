@@ -55,12 +55,12 @@ class InlinePlanWidget(Vertical, can_focus=True):
 
     def _build_content(self) -> str:
         lines = [
-            "\n [bold #875fff]VelaCode has written up a plan and is ready to execute. "
-            "Would you like to proceed?[/bold #875fff]\n"
+            "\n [bold #FAB283]VelaCode has written up a plan and is ready to execute. "
+            "Would you like to proceed?[/bold #FAB283]\n"
         ]
         for i, (label, _choice) in enumerate(_OPTIONS):
             if i == self._cursor:
-                lines.append(f" [bold cyan]❯[/bold cyan] {i + 1}. [bold]{label}[/bold]")
+                lines.append(f" [bold #FAB283]❯[/bold #FAB283] {i + 1}. [bold]{label}[/bold]")
             else:
                 lines.append(f"   {i + 1}. [dim]{label}[/dim]")
 

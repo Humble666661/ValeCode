@@ -34,3 +34,9 @@ class NoAltScreenDriver(_BaseDriver):
             data = data.replace("\x1b[?1049l", "")
         if data:
             super().write(data)
+
+    def stop_application_mode(self) -> None:
+        # 没有备用屏可供恢复，退出前必须主动擦除 Textual 的最后一帧。
+        # 只清当前可视区域，不清 scrollback，用户仍可向上查看历史输出。
+        self.write("\x1b[2J\x1b[H")
+        super().stop_application_mode()

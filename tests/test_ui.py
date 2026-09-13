@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from textual.widgets import Static
 
@@ -7,6 +9,7 @@ from valecode import __version__
 from valecode.app import ToolCallBlock, VelaCodeApp
 from valecode.commands.completion import CompletionPopup
 from valecode.config import ProviderConfig
+from valecode.driver import NoAltScreenDriver
 
 
 def _provider(name: str, model: str) -> ProviderConfig:
@@ -55,6 +58,20 @@ def test_completion_popup_window_follows_cursor() -> None:
     assert popup.get_selected() == "/cmd9"
     assert "/cmd9" in rendered
     assert "/cmd0" not in rendered
+
+
+def test_no_alt_screen_driver_clears_last_frame_on_exit() -> None:
+    driver = object.__new__(NoAltScreenDriver)
+    base_driver = NoAltScreenDriver.__mro__[1]
+
+    with (
+        patch.object(NoAltScreenDriver, "write") as write,
+        patch.object(base_driver, "stop_application_mode") as stop,
+    ):
+        driver.stop_application_mode()
+
+    write.assert_called_once_with("\x1b[2J\x1b[H")
+    stop.assert_called_once_with()
 
 
 @pytest.mark.asyncio

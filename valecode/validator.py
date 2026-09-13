@@ -236,13 +236,37 @@ def validate_sandbox(raw_sb: dict | None) -> dict:
     return result
 
 
+def validate_remote(raw_remote: dict | None) -> dict:
+    """校验 Remote 服务监听地址、端口和访问 Token。"""
+    defaults = {
+        "host": "127.0.0.1",
+        "port": 18888,
+        "token": "",
+    }
+    if raw_remote is None:
+        return defaults
+    if not isinstance(raw_remote, dict):
+        raise ConfigError("'remote' must be a mapping")
+
+    host = raw_remote.get("host", defaults["host"])
+    port = raw_remote.get("port", defaults["port"])
+    token = raw_remote.get("token", defaults["token"])
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError("'remote.host' must be a non-empty string")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ConfigError("'remote.port' must be an integer between 1 and 65535")
+    if not isinstance(token, str):
+        raise ConfigError("'remote.token' must be a string")
+    return {"host": host.strip(), "port": port, "token": token.strip()}
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
     返回的字典包含以下键：
         providers、permission_mode、mcp_servers、hooks、
         enable_fork、enable_verification_agent、worktree、
-        teammate_mode、enable_coordinator_mode、sandbox
+        teammate_mode、enable_coordinator_mode、sandbox、remote
     """
     if not isinstance(raw, dict) or "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
@@ -262,4 +286,5 @@ def validate_config_structure(raw: object) -> dict:
             raw.get("enable_coordinator_mode", False), "enable_coordinator_mode"
         ),
         "sandbox": validate_sandbox(raw.get("sandbox")),
+        "remote": validate_remote(raw.get("remote")),
     }

@@ -122,8 +122,22 @@ uv run valecode -p "运行测试并总结失败原因" --output-format stream-js
 uv run valecode --remote
 ```
 
-远程模式启动 WebSocket 服务和浏览器界面，默认监听 `0.0.0.0:18888`。请仅在
-可信网络或受控的反向代理之后使用该入口。
+远程模式启动 WebSocket 服务和浏览器界面，安全默认值为
+`127.0.0.1:18888`。只在本机使用时无需 Token；浏览器会在启用鉴权时提示输入，
+并仅把它保存在当前标签页的 `sessionStorage` 中。
+
+需要从局域网访问时，在 `.env.local` 或系统环境变量中显式配置：
+
+```dotenv
+VALECODE_REMOTE_HOST=0.0.0.0
+VALECODE_REMOTE_PORT=18888
+VALECODE_REMOTE_TOKEN=replace-with-a-long-random-token
+```
+
+非回环地址未配置 Token 时，ValeCode 会拒绝启动。WebSocket 客户端可通过
+`Authorization: Bearer <token>` 或 `?token=<token>` 完成认证。跨主机部署仍应放在
+启用 HTTPS/WSS 的受控反向代理之后；ValeCode 本身不终止 TLS。不要把真实 Token
+写入 YAML 或提交到版本库。
 
 ## 配置层级
 
@@ -142,8 +156,9 @@ YAML 配置从低到高依次合并：
 2. 项目 `.valecode/config.yaml`
 3. 项目 `.valecode/config.local.yaml`
 
-单 Provider 场景可只使用 `.env`；多 Provider、MCP、Hooks、Worktree 和 Sandbox
-等配置适合放在 YAML 中。YAML 字符串支持 `${ENV_NAME}` 引用环境变量。
+单 Provider 场景可只使用 `.env`；多 Provider、MCP、Hooks、Worktree、Sandbox 和
+Remote host/port 等配置适合放在 YAML 中。Remote Token 等秘密应放在 `.env.local`
+或系统环境变量。YAML 字符串支持 `${ENV_NAME}` 引用环境变量。
 
 ## 常用交互命令
 
@@ -208,7 +223,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **662 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **676 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

@@ -74,7 +74,7 @@ def main() -> None:
         "--remote",
         action="store_true",
         default=False,
-        help="Start in remote mode: WebSocket server on 0.0.0.0:18888 with browser UI",
+        help="Start the browser UI (defaults to 127.0.0.1:18888)",
     )
     args = parser.parse_args()
 
@@ -107,16 +107,23 @@ def main() -> None:
         asyncio.run(_run_prompt(config, permission_mode, hook_engine, args.p, output_format))
         return
 
-    # Remote 模式：启动 WebSocket 服务器，浏览器访问 http://localhost:18888
+    # Remote 模式：默认只监听回环地址；非回环监听必须配置访问 Token。
     if args.remote:
         from valecode.remote import RemoteServer
 
-        server = RemoteServer(
-            providers=config.providers,
-            mcp_servers=config.mcp_servers,
-            hook_engine=hook_engine,
-            sandbox_config=config.sandbox,
-        )
+        try:
+            server = RemoteServer(
+                providers=config.providers,
+                mcp_servers=config.mcp_servers,
+                hook_engine=hook_engine,
+                sandbox_config=config.sandbox,
+                addr=config.remote.host,
+                port=config.remote.port,
+                auth_token=config.remote.token,
+            )
+        except ValueError as e:
+            print(f"Remote config error: {e}", file=sys.stderr)
+            sys.exit(1)
         asyncio.run(server.run())
         return
 

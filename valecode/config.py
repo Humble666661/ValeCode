@@ -181,6 +181,18 @@ class SandboxAppConfig:
 
 
 @dataclass
+class RemoteAppConfig:
+    """Remote Web UI 的监听与认证配置。"""
+
+    host: str = "127.0.0.1"
+    port: int = 18888
+    token: str = ""
+    _specified_fields: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
+
+
+@dataclass
 class AppConfig:
     providers: list[ProviderConfig]
     permission_mode: str = "default"
@@ -192,6 +204,7 @@ class AppConfig:
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
     sandbox: SandboxAppConfig = field(default_factory=SandboxAppConfig)
+    remote: RemoteAppConfig = field(default_factory=RemoteAppConfig)
     _specified_fields: frozenset[str] = field(
         default_factory=frozenset, repr=False, compare=False
     )
@@ -241,6 +254,12 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
         auto_allow=sb["auto_allow"],
         network_enabled=sb["network_enabled"],
     )
+    remote_data = validated["remote"]
+    remote_cfg = RemoteAppConfig(
+        host=remote_data["host"],
+        port=remote_data["port"],
+        token=remote_data["token"],
+    )
 
     return AppConfig(
         providers=providers,
@@ -253,6 +272,7 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
         teammate_mode=validated["teammate_mode"],
         enable_coordinator_mode=validated["enable_coordinator_mode"],
         sandbox=sandbox_cfg,
+        remote=remote_cfg,
     )
 
 
@@ -271,6 +291,9 @@ def _load_single_file(path: Path, env: Mapping[str, str] | None = None) -> AppCo
     raw_sandbox = raw.get("sandbox")
     if isinstance(raw_sandbox, dict):
         config.sandbox._specified_fields = frozenset(raw_sandbox)
+    raw_remote = raw.get("remote")
+    if isinstance(raw_remote, dict):
+        config.remote._specified_fields = frozenset(raw_remote)
     return config
 
 
@@ -307,6 +330,14 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
         base.sandbox.auto_allow = override.sandbox.auto_allow
     if "network_enabled" in sandbox_fields:
         base.sandbox.network_enabled = override.sandbox.network_enabled
+
+    remote_fields = override.remote._specified_fields
+    if "host" in remote_fields:
+        base.remote.host = override.remote.host
+    if "port" in remote_fields:
+        base.remote.port = override.remote.port
+    if "token" in remote_fields:
+        base.remote.token = override.remote.token
     return base
 
 
@@ -327,6 +358,13 @@ def _parse_env_int(value: str, key: str) -> int:
     if parsed < 0:
         raise ConfigError(f"{key} must be a non-negative integer")
     return parsed
+
+
+def _parse_env_port(value: str, key: str) -> int:
+    port = _parse_env_int(value, key)
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"{key} must be an integer between 1 and 65535")
+    return port
 
 
 def _provider_from_env(env: Mapping[str, str]) -> ProviderConfig | None:
@@ -414,6 +452,17 @@ def _apply_env_overrides(config: AppConfig, env: Mapping[str, str]) -> AppConfig
                 f"{', '.join(sorted(VALID_PERMISSION_MODES))}"
             )
         config.permission_mode = mode
+    if "VALECODE_REMOTE_HOST" in env:
+        host = env["VALECODE_REMOTE_HOST"].strip()
+        if not host:
+            raise ConfigError("VALECODE_REMOTE_HOST must be a non-empty string")
+        config.remote.host = host
+    if "VALECODE_REMOTE_PORT" in env:
+        config.remote.port = _parse_env_port(
+            env["VALECODE_REMOTE_PORT"], "VALECODE_REMOTE_PORT"
+        )
+    if "VALECODE_REMOTE_TOKEN" in env:
+        config.remote.token = env["VALECODE_REMOTE_TOKEN"].strip()
     return config
 
 

@@ -18,6 +18,9 @@ _CONFIG_ENV_KEYS = (
     "VALECODE_CONTEXT_WINDOW",
     "VALECODE_MAX_OUTPUT_TOKENS",
     "VALECODE_PERMISSION_MODE",
+    "VALECODE_REMOTE_HOST",
+    "VALECODE_REMOTE_PORT",
+    "VALECODE_REMOTE_TOKEN",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
 )
@@ -130,6 +133,43 @@ def test_incomplete_dotenv_provider_is_rejected(
         load_config()
 
 
+def test_remote_configuration_loads_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = _isolate_paths(monkeypatch, tmp_path)
+    (project / ".env").write_text(
+        "VALECODE_PROTOCOL=anthropic\n"
+        "VALECODE_BASE_URL=https://api.example.test\n"
+        "VALECODE_MODEL=test-model\n"
+        "VALECODE_REMOTE_HOST=0.0.0.0\n"
+        "VALECODE_REMOTE_PORT=19999\n"
+        "VALECODE_REMOTE_TOKEN=remote-secret\n",
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.remote.host == "0.0.0.0"
+    assert config.remote.port == 19999
+    assert config.remote.token == "remote-secret"
+
+
+def test_remote_port_from_dotenv_must_be_valid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = _isolate_paths(monkeypatch, tmp_path)
+    (project / ".env").write_text(
+        "VALECODE_PROTOCOL=anthropic\n"
+        "VALECODE_BASE_URL=https://api.example.test\n"
+        "VALECODE_MODEL=test-model\n"
+        "VALECODE_REMOTE_PORT=70000\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="between 1 and 65535"):
+        load_config()
+
+
 def test_later_yaml_layer_can_explicitly_disable_boolean_options(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -153,7 +193,11 @@ def test_later_yaml_layer_can_explicitly_disable_boolean_options(
         + "sandbox:\n"
         + "  enabled: true\n"
         + "  auto_allow: true\n"
-        + "  network_enabled: true\n",
+        + "  network_enabled: true\n"
+        + "remote:\n"
+        + "  host: 0.0.0.0\n"
+        + "  port: 19999\n"
+        + "  token: upper-secret\n",
         encoding="utf-8",
     )
     (project / ".valecode" / "config.local.yaml").write_text(
@@ -165,7 +209,11 @@ def test_later_yaml_layer_can_explicitly_disable_boolean_options(
         + "sandbox:\n"
         + "  enabled: false\n"
         + "  auto_allow: false\n"
-        + "  network_enabled: false\n",
+        + "  network_enabled: false\n"
+        + "remote:\n"
+        + "  host: 127.0.0.1\n"
+        + "  port: 18888\n"
+        + "  token: ''\n",
         encoding="utf-8",
     )
 
@@ -178,6 +226,9 @@ def test_later_yaml_layer_can_explicitly_disable_boolean_options(
     assert config.sandbox.enabled is False
     assert config.sandbox.auto_allow is False
     assert config.sandbox.network_enabled is False
+    assert config.remote.host == "127.0.0.1"
+    assert config.remote.port == 18888
+    assert config.remote.token == ""
 
 
 def test_unspecified_yaml_fields_keep_values_from_earlier_layer(
@@ -203,7 +254,11 @@ def test_unspecified_yaml_fields_keep_values_from_earlier_layer(
         + "sandbox:\n"
         + "  enabled: true\n"
         + "  auto_allow: true\n"
-        + "  network_enabled: true\n",
+        + "  network_enabled: true\n"
+        + "remote:\n"
+        + "  host: 0.0.0.0\n"
+        + "  port: 19999\n"
+        + "  token: upper-secret\n",
         encoding="utf-8",
     )
     (project / ".valecode" / "config.local.yaml").write_text(
@@ -219,3 +274,6 @@ def test_unspecified_yaml_fields_keep_values_from_earlier_layer(
     assert config.sandbox.enabled is True
     assert config.sandbox.auto_allow is True
     assert config.sandbox.network_enabled is True
+    assert config.remote.host == "0.0.0.0"
+    assert config.remote.port == 19999
+    assert config.remote.token == "upper-secret"

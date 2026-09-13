@@ -218,8 +218,10 @@ const sendBtn = document.getElementById('send-btn');
 const connStatus = document.getElementById('conn-status');
 const tokenInfo = document.getElementById('token-info');
 const slashMenu = document.getElementById('slash-menu');
+const remoteAuthRequired = false;
 
 let ws = null;
+let remoteToken = sessionStorage.getItem('valecode.remoteToken') || '';
 let streaming = false;
 let allCommands = [];
 let slashCursor = 0;
@@ -231,6 +233,14 @@ let currentThinkingText = '';
 let autoScroll = true;
 let pingTimer = null;
 let connectedOnce = false;
+
+function requestRemoteToken(message) {
+  const value = window.prompt(message || '请输入 ValeCode Remote Token：');
+  if (value === null || value.trim() === '') return false;
+  remoteToken = value.trim();
+  sessionStorage.setItem('valecode.remoteToken', remoteToken);
+  return true;
+}
 
 // Markdown 渲染配置
 if (typeof marked !== 'undefined') {
@@ -249,12 +259,20 @@ function escapeHtml(s) {
 }
 
 function connect() {
+  if (remoteAuthRequired && !remoteToken && !requestRemoteToken()) {
+    connStatus.innerHTML = '<span class="dot disconnected"></span>Token required';
+    return;
+  }
   if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   if (ws) { try { ws.onclose = null; ws.close(); } catch(e) {} ws = null; }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  const wsUrl = new URL(proto + '//' + location.host + '/ws');
+  if (remoteToken) wsUrl.searchParams.set('token', remoteToken);
+  let opened = false;
+  ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
+    opened = true;
     connStatus.innerHTML = '<span class="dot connected"></span>Connected';
     // 每 10 秒发一次应用层 ping，防止连接被中间件/浏览器回收
     pingTimer = setInterval(() => {
@@ -265,8 +283,17 @@ function connect() {
   };
 
   ws.onclose = () => {
-    connStatus.innerHTML = '<span class="dot disconnected"></span>Reconnecting...';
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (remoteAuthRequired && !opened) {
+      remoteToken = '';
+      sessionStorage.removeItem('valecode.remoteToken');
+      connStatus.innerHTML = '<span class="dot disconnected"></span>Authentication failed';
+      if (requestRemoteToken('认证失败或服务不可用，请重新输入 Remote Token：')) {
+        setTimeout(connect, 0);
+      }
+      return;
+    }
+    connStatus.innerHTML = '<span class="dot disconnected"></span>Reconnecting...';
     setTimeout(connect, 3000);
   };
 

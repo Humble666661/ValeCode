@@ -9,12 +9,15 @@ Remote Control 服务器：通过 WebSocket 桥接 Agent 事件和 Web UI。
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import json
 import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import websockets
 from websockets.asyncio.server import Server as WSServer, ServerConnection
@@ -62,6 +65,17 @@ from valecode.web_content import INDEX_HTML
 log = logging.getLogger(__name__)
 
 
+def _is_loopback_bind(host: str) -> bool:
+    """Return whether a bind target is restricted to the local machine."""
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
 class RemoteServer:
     """Remote Control 核心：桥接 Agent 事件和 WebSocket 客户端。"""
 
@@ -70,15 +84,21 @@ class RemoteServer:
         providers: list[ProviderConfig],
         mcp_servers: list[MCPServerConfig] | None = None,
         hook_engine: HookEngine | None = None,
-        addr: str = "0.0.0.0",
+        addr: str = "127.0.0.1",
         port: int = 18888,
         sandbox_config: SandboxAppConfig | None = None,
+        auth_token: str = "",
     ) -> None:
+        if not _is_loopback_bind(addr) and not auth_token:
+            raise ValueError(
+                "Remote access token is required when binding outside localhost"
+            )
         self.providers = providers
         self._mcp_server_configs = mcp_servers or []
         self.hook_engine = hook_engine
         self.addr = addr
         self.port = port
+        self.auth_token = auth_token
         self._sandbox_config = sandbox_config or SandboxAppConfig()
 
         # WebSocket 连接池（支持多客户端广播）
@@ -123,7 +143,14 @@ class RemoteServer:
         # 初始化 MCP（如果有配置）
         await self._init_mcp()
 
-        print(f"\n  Remote UI: http://localhost:{self.port}\n")
+        display_host = "localhost" if _is_loopback_bind(self.addr) else self.addr
+        try:
+            if ipaddress.ip_address(display_host).version == 6:
+                display_host = f"[{display_host}]"
+        except ValueError:
+            pass
+        auth_note = " (Token required)" if self.auth_token else ""
+        print(f"\n  Remote UI: http://{display_host}:{self.port}{auth_note}\n")
 
         # websockets 的 serve 支持 process_request 回调来处理普通 HTTP
         async with websockets.serve(
@@ -146,17 +173,49 @@ class RemoteServer:
         """拦截 HTTP 请求，对 / 路径返回 HTML 页面。
         返回 None 表示继续走 WebSocket 升级流程。
         """
-        if request.path == "/":
+        parsed = urlsplit(request.path)
+        if parsed.path == "/":
+            html = INDEX_HTML.replace(
+                "const remoteAuthRequired = false;",
+                f"const remoteAuthRequired = {str(bool(self.auth_token)).lower()};",
+                1,
+            )
             return Response(
                 200,
                 "OK",
                 websockets.Headers({"Content-Type": "text/html; charset=utf-8"}),
-                INDEX_HTML.encode("utf-8"),
+                html.encode("utf-8"),
             )
-        if request.path != "/ws":
+        if parsed.path != "/ws":
             return Response(404, "Not Found", websockets.Headers(), b"404 Not Found")
+        if not self._request_is_authorized(request, parsed.query):
+            return Response(
+                401,
+                "Unauthorized",
+                websockets.Headers(
+                    {
+                        "Content-Type": "text/plain; charset=utf-8",
+                        "WWW-Authenticate": "Bearer realm=\"ValeCode Remote\"",
+                        "Cache-Control": "no-store",
+                    }
+                ),
+                b"Unauthorized",
+            )
         # /ws 路径 → 继续 WebSocket 升级
         return None
+
+    def _request_is_authorized(self, request: Request, query: str) -> bool:
+        if not self.auth_token:
+            return True
+        candidates: list[str] = []
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, credentials = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer":
+            candidates.append(credentials.strip())
+        candidates.extend(parse_qs(query, keep_blank_values=True).get("token", []))
+        return any(
+            hmac.compare_digest(candidate, self.auth_token) for candidate in candidates
+        )
 
     # ------------------------------------------------------------------
     # WebSocket 连接处理

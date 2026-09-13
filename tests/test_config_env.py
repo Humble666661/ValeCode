@@ -128,3 +128,94 @@ def test_incomplete_dotenv_provider_is_rejected(
 
     with pytest.raises(ConfigError, match="VALECODE_BASE_URL"):
         load_config()
+
+
+def test_later_yaml_layer_can_explicitly_disable_boolean_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = _isolate_paths(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / ".valecode").mkdir()
+    (project / ".valecode").mkdir()
+    provider = (
+        "providers:\n"
+        "  - name: test\n"
+        "    protocol: anthropic\n"
+        "    base_url: https://api.example.test\n"
+        "    model: test-model\n"
+    )
+    (home / ".valecode" / "config.yaml").write_text(
+        provider
+        + "permission_mode: bypassPermissions\n"
+        + "enable_fork: true\n"
+        + "enable_verification_agent: true\n"
+        + "enable_coordinator_mode: true\n"
+        + "sandbox:\n"
+        + "  enabled: true\n"
+        + "  auto_allow: true\n"
+        + "  network_enabled: true\n",
+        encoding="utf-8",
+    )
+    (project / ".valecode" / "config.local.yaml").write_text(
+        provider
+        + "permission_mode: default\n"
+        + "enable_fork: false\n"
+        + "enable_verification_agent: false\n"
+        + "enable_coordinator_mode: false\n"
+        + "sandbox:\n"
+        + "  enabled: false\n"
+        + "  auto_allow: false\n"
+        + "  network_enabled: false\n",
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.permission_mode == "default"
+    assert config.enable_fork is False
+    assert config.enable_verification_agent is False
+    assert config.enable_coordinator_mode is False
+    assert config.sandbox.enabled is False
+    assert config.sandbox.auto_allow is False
+    assert config.sandbox.network_enabled is False
+
+
+def test_unspecified_yaml_fields_keep_values_from_earlier_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = _isolate_paths(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / ".valecode").mkdir()
+    (project / ".valecode").mkdir()
+    provider = (
+        "providers:\n"
+        "  - name: test\n"
+        "    protocol: anthropic\n"
+        "    base_url: https://api.example.test\n"
+        "    model: test-model\n"
+    )
+    (home / ".valecode" / "config.yaml").write_text(
+        provider
+        + "permission_mode: plan\n"
+        + "enable_fork: true\n"
+        + "enable_verification_agent: true\n"
+        + "enable_coordinator_mode: true\n"
+        + "sandbox:\n"
+        + "  enabled: true\n"
+        + "  auto_allow: true\n"
+        + "  network_enabled: true\n",
+        encoding="utf-8",
+    )
+    (project / ".valecode" / "config.local.yaml").write_text(
+        provider, encoding="utf-8"
+    )
+
+    config = load_config()
+
+    assert config.permission_mode == "plan"
+    assert config.enable_fork is True
+    assert config.enable_verification_agent is True
+    assert config.enable_coordinator_mode is True
+    assert config.sandbox.enabled is True
+    assert config.sandbox.auto_allow is True
+    assert config.sandbox.network_enabled is True

@@ -175,6 +175,9 @@ class SandboxAppConfig:
     enabled: bool = False         # 是否启用 OS 级沙箱
     auto_allow: bool = False      # 是否自动放行命令（沙箱兜底）
     network_enabled: bool = False  # 沙箱内是否允许网络访问
+    _specified_fields: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
 
 
 @dataclass
@@ -189,6 +192,9 @@ class AppConfig:
     teammate_mode: str = ""
     enable_coordinator_mode: bool = False
     sandbox: SandboxAppConfig = field(default_factory=SandboxAppConfig)
+    _specified_fields: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
 
 
 def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
@@ -259,13 +265,20 @@ def _load_single_file(path: Path, env: Mapping[str, str] | None = None) -> AppCo
 
     raw = _resolve_nested_env(raw, effective_env)
     validated = validate_config_structure(raw)
-    return _build_app_config(validated, effective_env)
+    config = _build_app_config(validated, effective_env)
+    assert isinstance(raw, dict)
+    config._specified_fields = frozenset(raw)
+    raw_sandbox = raw.get("sandbox")
+    if isinstance(raw_sandbox, dict):
+        config.sandbox._specified_fields = frozenset(raw_sandbox)
+    return config
 
 
 def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
+    specified = override._specified_fields
     if override.providers:
         base.providers = override.providers
-    if override.permission_mode != "default":
+    if "permission_mode" in specified:
         base.permission_mode = override.permission_mode
 
     if override.mcp_servers:
@@ -278,21 +291,22 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
                 by_name[s.name] = len(base.mcp_servers) - 1
 
     base.raw_hooks.extend(override.raw_hooks)
-    if override.enable_fork:
-        base.enable_fork = True
-    if override.enable_verification_agent:
-        base.enable_verification_agent = True
-    if override.teammate_mode:
+    if "enable_fork" in specified:
+        base.enable_fork = override.enable_fork
+    if "enable_verification_agent" in specified:
+        base.enable_verification_agent = override.enable_verification_agent
+    if "teammate_mode" in specified:
         base.teammate_mode = override.teammate_mode
-    if override.enable_coordinator_mode:
-        base.enable_coordinator_mode = True
-    # 沙箱配置：后层覆盖前层（任一字段为非默认值即覆盖）
-    if override.sandbox.enabled:
-        base.sandbox.enabled = True
-    if override.sandbox.auto_allow:
-        base.sandbox.auto_allow = True
-    if override.sandbox.network_enabled:
-        base.sandbox.network_enabled = True
+    if "enable_coordinator_mode" in specified:
+        base.enable_coordinator_mode = override.enable_coordinator_mode
+
+    sandbox_fields = override.sandbox._specified_fields
+    if "enabled" in sandbox_fields:
+        base.sandbox.enabled = override.sandbox.enabled
+    if "auto_allow" in sandbox_fields:
+        base.sandbox.auto_allow = override.sandbox.auto_allow
+    if "network_enabled" in sandbox_fields:
+        base.sandbox.network_enabled = override.sandbox.network_enabled
     return base
 
 

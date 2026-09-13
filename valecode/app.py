@@ -357,7 +357,7 @@ def _format_detail(tool_name: str, arguments: dict[str, Any], output: str) -> st
 def _make_assistant_label() -> Static:
     label = RichText()
     label.append("◆ ", style="bold #FAB283")
-    label.append("VelaCode", style="bold #EEEEEE")
+    label.append("ValeCode", style="bold #EEEEEE")
     return Static(label, classes="message assistant-label")
 
 
@@ -569,9 +569,9 @@ _VALECODE_THEME = Theme(
 )
 
 
-class VelaCodeApp(App):
+class ValeCodeApp(App):
     CSS_PATH = "styles.tcss"
-    TITLE = "VelaCode"
+    TITLE = "ValeCode"
     INLINE_PADDING = 0
     theme = "valecode"
     BINDINGS = [
@@ -658,7 +658,7 @@ class VelaCodeApp(App):
     ) -> RichText:
         t = RichText()
         t.append("◆ ", style="bold #FAB283")
-        t.append("VelaCode", style="bold #EEEEEE")
+        t.append("ValeCode", style="bold #EEEEEE")
         t.append(f"  v{__version__}\n", style="#606060")
         t.append("  ")
         if model:
@@ -980,7 +980,7 @@ class VelaCodeApp(App):
         self.query_one("#chat-area").display = True
         self.query_one("#input-area").display = True
         chat_input = self.query_one("#chat-input", ChatInput)
-        chat_input.placeholder = "Ask VelaCode anything…"
+        chat_input.placeholder = "Ask ValeCode anything…"
         chat_input.load_history(work_dir)
         chat_input.focus()
 

@@ -1,4 +1,4 @@
-"""VelaCode 的配置校验逻辑。"""
+"""ValeCode 的配置校验逻辑。"""
 
 from __future__ import annotations
 

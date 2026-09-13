@@ -20,7 +20,7 @@ async def handle_exit(ctx: CommandContext) -> None:
 EXIT_COMMAND = Command(
     name="exit",
     aliases=["quit", "q"],
-    description="安全退出 VelaCode",
+    description="安全退出 ValeCode",
     usage="/exit",
     type=CommandType.LOCAL_UI,
     handler=handle_exit,

@@ -10,7 +10,7 @@ VERSION = "v0.9.0"
 
 
 async def handle_status(ctx: CommandContext) -> None:
-    lines = ["VelaCode 状态", "─────────────"]
+    lines = ["ValeCode 状态", "─────────────"]
 
     mode = ctx.agent.permission_mode.value if ctx.agent else "unknown"
     lines.append(f"模式: {mode}")
@@ -51,4 +51,3 @@ STATUS_COMMAND = Command(
     type=CommandType.LOCAL,
     handler=handle_status,
 )
-

@@ -316,7 +316,7 @@ class TestExitHandler:
 
         command = registry.find("exit")
         assert command is not None
-        assert command.description == "安全退出 VelaCode"
+        assert command.description == "安全退出 ValeCode"
         assert registry.find("quit") is command
 
 class TestPlanDoHandlers:
@@ -398,7 +398,7 @@ class TestStatusHandler:
         ctx.memory_manager.load.return_value = ""
 
         await handle_status(ctx)
-        assert "VelaCode 状态" in ui.messages[0]
+        assert "ValeCode 状态" in ui.messages[0]
         assert "default" in ui.messages[0]
 
 class TestSessionHandler:

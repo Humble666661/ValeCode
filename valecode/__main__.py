@@ -25,7 +25,7 @@ def main() -> None:
         filemode="w",
     )
 
-    parser = argparse.ArgumentParser(prog="valecode", description="VelaCode AI coding assistant")
+    parser = argparse.ArgumentParser(prog="valecode", description="ValeCode AI coding assistant")
     parser.add_argument(
         "--mode",
         choices=[m.value for m in PermissionMode],
@@ -91,10 +91,10 @@ def main() -> None:
         asyncio.run(server.run())
         return
 
-    from valecode.app import VelaCodeApp
+    from valecode.app import ValeCodeApp
     from valecode.driver import NoAltScreenDriver
 
-    app = VelaCodeApp(
+    app = ValeCodeApp(
         providers=config.providers,
         permission_mode=permission_mode,
         mcp_servers=config.mcp_servers,

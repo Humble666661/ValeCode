@@ -1,6 +1,6 @@
-# VelaCode
+# ValeCode
 
-VelaCode 是一个面向真实软件工程任务的终端 AI 编程助手。它以 Python `asyncio`
+ValeCode 是一个面向真实软件工程任务的终端 AI 编程助手。它以 Python `asyncio`
 构建 Agent Runtime，支持多模型协议、工具调用、MCP、Skills、Sub-Agent、Agent
 Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
 
@@ -127,7 +127,7 @@ uv run valecode --remote
 
 ## 配置层级
 
-VelaCode 同时支持 `.env` 和 YAML 配置。
+ValeCode 同时支持 `.env` 和 YAML 配置。
 
 环境变量从低到高依次覆盖：
 
@@ -161,7 +161,7 @@ YAML 配置从低到高依次合并：
 
 ## 恢复与副作用语义
 
-VelaCode 在启动时扫描遗留 Run，并将未完成状态收敛为可恢复状态：
+ValeCode 在启动时扫描遗留 Run，并将未完成状态收敛为可恢复状态：
 
 - 已提交结果的工具调用按稳定幂等键复用；
 - 未开始或只读调用可以安全重试；
@@ -197,7 +197,7 @@ sandbox:
   network_enabled: false
 ```
 
-VelaCode 会实际探测沙箱 namespace 是否可用。探测失败时不会静默退回宿主 Shell；
+ValeCode 会实际探测沙箱 namespace 是否可用。探测失败时不会静默退回宿主 Shell；
 `auto_allow` 仅在 OS 沙箱成功附加后对 Bash 生效。Windows 环境需要默认 WSL2
 发行版，并在该发行版中安装 `bubblewrap`。
 

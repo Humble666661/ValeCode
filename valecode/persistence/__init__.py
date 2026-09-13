@@ -1,4 +1,4 @@
-"""Durable SQLite control-plane persistence for VelaCode."""
+"""Durable SQLite control-plane persistence for ValeCode."""
 
 from valecode.persistence.database import Database
 from valecode.persistence.checkpoint_store import CheckpointState, CheckpointStore

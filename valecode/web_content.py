@@ -7,7 +7,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VelaCode Remote</title>
+<title>ValeCode Remote</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
@@ -196,7 +196,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 <body>
 <div id="app">
   <div id="status-bar">
-    <span class="brand">⚡ VelaCode Remote</span>
+    <span class="brand">⚡ ValeCode Remote</span>
     <div class="info">
       <span id="conn-status"><span class="dot disconnected"></span>Connecting...</span>
       <span id="token-info"></span>

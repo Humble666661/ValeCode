@@ -18,7 +18,7 @@ class PlanChoice(str, Enum):
 _OPTIONS = [
     ("Yes, enter YOLO mode (auto-approve all)", PlanChoice.YOLO),
     ("Yes, manually approve edits", PlanChoice.MANUAL),
-    ("Tell VelaCode what to change", PlanChoice.FEEDBACK),
+    ("Tell ValeCode what to change", PlanChoice.FEEDBACK),
 ]
 
 
@@ -55,7 +55,7 @@ class InlinePlanWidget(Vertical, can_focus=True):
 
     def _build_content(self) -> str:
         lines = [
-            "\n [bold #FAB283]VelaCode has written up a plan and is ready to execute. "
+            "\n [bold #FAB283]ValeCode has written up a plan and is ready to execute. "
             "Would you like to proceed?[/bold #FAB283]\n"
         ]
         for i, (label, _choice) in enumerate(_OPTIONS):

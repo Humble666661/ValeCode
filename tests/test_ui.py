@@ -6,7 +6,7 @@ import pytest
 from textual.widgets import Static
 
 from valecode import __version__
-from valecode.app import ToolCallBlock, VelaCodeApp
+from valecode.app import ToolCallBlock, ValeCodeApp
 from valecode.commands.completion import CompletionPopup
 from valecode.config import ProviderConfig
 from valecode.driver import NoAltScreenDriver
@@ -23,12 +23,12 @@ def _provider(name: str, model: str) -> ProviderConfig:
 
 
 def test_banner_uses_package_version_and_runtime_context() -> None:
-    banner = VelaCodeApp._make_banner(
+    banner = ValeCodeApp._make_banner(
         "test-model", "C:/workspace", "test-provider"
     )
 
     assert banner.plain == (
-        f"◆ VelaCode  v{__version__}\n"
+        f"◆ ValeCode  v{__version__}\n"
         "  test-provider / test-model  ·  C:/workspace"
     )
 
@@ -79,13 +79,13 @@ def test_no_alt_screen_driver_clears_last_frame_on_exit() -> None:
 async def test_app_composes_branded_shell_and_shortcut_bar(
     size: tuple[int, int],
 ) -> None:
-    app = VelaCodeApp(
+    app = ValeCodeApp(
         [_provider("first", "model-a"), _provider("second", "model-b")]
     )
 
     async with app.run_test(size=size):
         title = app.query_one("#title-bar", Static).render()
-        assert "VelaCode" in str(title)
+        assert "ValeCode" in str(title)
         assert f"v{__version__}" in str(title)
         assert "Select a provider to begin" in str(title)
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -15,15 +16,40 @@ from valecode.hooks import HookConfigError, HookEngine, load_hooks
 from valecode.permissions import PermissionMode
 
 
-def main() -> None:
-    # 先确保 .valecode/ 目录存在，否则下面写 debug.log 会因目录不存在而崩溃
-    Path(".valecode").mkdir(parents=True, exist_ok=True)
+def _configure_logging(
+    state_dir: Path = Path(".valecode"),
+    fallback_dir: Path | None = None,
+) -> Path | None:
+    """配置文件日志；项目目录不可写时降级到系统临时目录。"""
+    if fallback_dir is None:
+        fallback_dir = Path(tempfile.gettempdir()) / "valecode"
+
+    log_format = "%(asctime)s %(name)s %(message)s"
+    for directory in (state_dir, fallback_dir):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            log_path = directory / "debug.log"
+            logging.basicConfig(
+                level=logging.INFO,
+                format=log_format,
+                filename=str(log_path),
+                filemode="w",
+                force=True,
+            )
+            return log_path
+        except OSError:
+            continue
+
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(name)s %(message)s",
-        filename=".valecode/debug.log",
-        filemode="w",
+        format=log_format,
+        handlers=[logging.NullHandler()],
+        force=True,
     )
+    return None
+
+
+def main() -> None:
 
     parser = argparse.ArgumentParser(prog="valecode", description="ValeCode AI coding assistant")
     parser.add_argument(
@@ -51,6 +77,9 @@ def main() -> None:
         help="Start in remote mode: WebSocket server on 0.0.0.0:18888 with browser UI",
     )
     args = parser.parse_args()
+
+    # --help / argparse 参数错误应在触碰项目状态目录之前完成。
+    _configure_logging()
 
     try:
         config = load_config()

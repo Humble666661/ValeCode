@@ -6,10 +6,12 @@ from textual.widgets import Static
 
 class CompletionPopup(Static):
 
+    MAX_VISIBLE_ITEMS = 8
+
     DEFAULT_CSS = """
     CompletionPopup {
         height: auto;
-        max-height: 8;
+        max-height: 10;
         display: none;
         padding: 0 1;
     }
@@ -63,8 +65,14 @@ class CompletionPopup(Static):
         return self._values[self._cursor]
 
     def _refresh_content(self) -> None:
+        start = max(0, self._cursor - self.MAX_VISIBLE_ITEMS + 1)
+        max_start = max(0, len(self._displays) - self.MAX_VISIBLE_ITEMS)
+        start = min(start, max_start)
+        end = min(len(self._displays), start + self.MAX_VISIBLE_ITEMS)
+
         lines = []
-        for i, display in enumerate(self._displays):
+        for i in range(start, end):
+            display = self._displays[i]
             if i == self._cursor:
                 lines.append(f"[bold reverse] {display} [/]")
             else:

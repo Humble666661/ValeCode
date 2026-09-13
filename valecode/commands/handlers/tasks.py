@@ -87,7 +87,7 @@ def create_tasks_handler(task_manager: TaskManager):
 def create_tasks_command(task_manager: TaskManager) -> Command:
     return Command(
         name="tasks",
-        description="管理后台任务（/tasks, /tasks info <id>, /tasks cancel <id>）",
+        description="管理后台任务",
         type=CommandType.LOCAL,
         handler=create_tasks_handler(task_manager),
         aliases=["task"],

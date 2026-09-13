@@ -97,7 +97,7 @@ async def _handle_reload(ctx: CommandContext, loader: SkillLoader) -> None:
 
 SKILL_COMMAND = Command(
     name="skill",
-    description="管理 Skill 技能包",
+    description="管理技能包",
     usage="/skill list | /skill info <name> | /skill reload",
     type=CommandType.LOCAL,
     handler=handle_skill,

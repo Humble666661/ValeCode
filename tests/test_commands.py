@@ -211,6 +211,13 @@ class TestComplete:
         assert "/compact" in values
         assert "/secret" not in values
 
+    def test_empty_prefix_does_not_truncate_commands(self) -> None:
+        registry = CommandRegistry()
+        for i in range(12):
+            registry.register_sync(_make_command(f"cmd{i:02d}"))
+
+        assert len(complete(registry, "/")) == 12
+
     def test_prefix_match(self) -> None:
         registry = self._build_registry()
         matches = complete(registry, "/com")
@@ -286,6 +293,31 @@ class TestHelpHandler:
         ctx.config = {"registry": registry}
         await handle_help(ctx)
         assert "未知命令" in ui.messages[0]
+
+
+class TestExitHandler:
+    @pytest.mark.asyncio
+    async def test_exit_uses_ui_callback(self) -> None:
+        from valecode.commands.handlers.exit import handle_exit
+
+        exit_app = AsyncMock()
+        ctx = _make_context()
+        ctx.config["exit_app"] = exit_app
+
+        await handle_exit(ctx)
+
+        exit_app.assert_awaited_once_with()
+
+    def test_exit_is_registered_with_chinese_description(self) -> None:
+        from valecode.commands.handlers import register_all_commands
+
+        registry = CommandRegistry()
+        register_all_commands(registry)
+
+        command = registry.find("exit")
+        assert command is not None
+        assert command.description == "安全退出 VelaCode"
+        assert registry.find("quit") is command
 
 class TestPlanDoHandlers:
 
@@ -450,11 +482,15 @@ class TestRegisterAllCommands:
         cmds = registry.list_commands()
         names = {c.name for c in cmds}
         expected = {
-            "help", "compact", "clear", "plan",
+            "help", "compact", "clear", "exit", "plan",
             "session", "mcp", "memory", "permission",
             "sandbox", "rewind", "status", "skill",
         }
         assert names == expected
+        assert all(
+            any("\u4e00" <= char <= "\u9fff" for char in command.description)
+            for command in cmds
+        )
 
     def test_no_alias_conflicts(self) -> None:
         from valecode.commands.handlers import register_all_commands

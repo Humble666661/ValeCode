@@ -44,7 +44,7 @@ def create_worktree_command(manager: WorktreeManager) -> Command:
     return Command(
         name="worktree",
         aliases=["wt"],
-        description="管理 Git Worktree",
+        description="管理 Git 工作树",
         usage="/worktree <create|list|enter|exit|status>",
         type=CommandType.LOCAL,
         handler=handle_worktree,

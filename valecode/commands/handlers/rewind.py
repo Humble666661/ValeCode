@@ -72,7 +72,7 @@ async def _handle_rewind(ctx) -> None:
 
 REWIND_COMMAND = Command(
     name="rewind",
-    description="Rewind to a previous checkpoint",
+    description="恢复到以前的检查点",
     type=CommandType.LOCAL,
     handler=_handle_rewind,
     usage="/rewind [checkpoint_number] [option]",

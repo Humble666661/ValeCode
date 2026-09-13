@@ -246,7 +246,7 @@ Screen {
 
 CompletionPopup {
     height: auto;
-    max-height: 8;
+    max-height: 10;
     margin: 0 1;
     padding: 0 1;
     color: #D8D8D8;

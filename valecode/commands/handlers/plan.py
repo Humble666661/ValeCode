@@ -26,9 +26,8 @@ async def handle_plan(ctx: CommandContext) -> None:
 PLAN_COMMAND = Command(
     name="plan",
     aliases=["p"],
-    description="切换到 Plan 模式",
+    description="切换到计划模式",
     usage="/plan [任务描述]",
     type=CommandType.LOCAL_UI,
     handler=handle_plan,
 )
-

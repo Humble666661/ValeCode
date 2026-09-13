@@ -5,6 +5,7 @@ from textual.widgets import Static
 
 from valecode import __version__
 from valecode.app import ToolCallBlock, VelaCodeApp
+from valecode.commands.completion import CompletionPopup
 from valecode.config import ProviderConfig
 
 
@@ -42,6 +43,20 @@ def test_tool_block_has_distinct_loading_success_and_error_states() -> None:
     assert failed.has_class("tool-block-error")
 
 
+def test_completion_popup_window_follows_cursor() -> None:
+    popup = CompletionPopup()
+    pairs = [(f"/cmd{i} — 命令 {i}", f"/cmd{i}") for i in range(12)]
+    popup.show_pairs(pairs)
+
+    for _ in range(9):
+        popup.move_down()
+
+    rendered = str(popup.render())
+    assert popup.get_selected() == "/cmd9"
+    assert "/cmd9" in rendered
+    assert "/cmd0" not in rendered
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(120, 40), (80, 24)])
 async def test_app_composes_branded_shell_and_shortcut_bar(
@@ -58,5 +73,5 @@ async def test_app_composes_branded_shell_and_shortcut_bar(
         assert "Select a provider to begin" in str(title)
 
         shortcut = app.query_one("#shortcut-label", Static)
-        assert "shift+enter newline" in str(shortcut.render())
+        assert "Shift+Enter 换行" in str(shortcut.render())
         assert app.theme == "valecode"

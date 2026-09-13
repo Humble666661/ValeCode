@@ -29,14 +29,11 @@ def register_skill_commands(
             }
         _REGISTERED_SKILL_NAMES.discard(name)
 
-    for skill_name, skill_desc in loader.get_catalog():
+    for skill_name, _skill_desc in loader.get_catalog():
         if registry.find(skill_name) is not None:
             continue
 
         s_name = skill_name
-        s_desc = skill_desc
-
-
         def make_handler(name: str) -> callable:
 
 
@@ -84,7 +81,7 @@ def register_skill_commands(
 
         cmd = Command(
             name=s_name,
-            description=f"{s_desc} [skill]",
+            description=f"运行“{s_name}”技能",
             usage=f"/{s_name} [args]",
             type=CommandType.PROMPT,
             handler=make_handler(s_name),

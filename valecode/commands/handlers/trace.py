@@ -70,7 +70,7 @@ def create_trace_command(trace_manager: TraceManager, lead_agent_id: str = "") -
 
     return Command(
         name="trace",
-        description="查看 Agent 父子追踪树（/trace）",
+        description="查看智能体父子追踪树",
         type=CommandType.LOCAL,
         handler=handler,
         aliases=["tree"],

@@ -693,7 +693,7 @@ class VelaCodeApp(App):
                 yield Static("● default", id="mode-label")
                 yield Static("", id="teammates-label")
                 yield Static(
-                    "enter send  ·  shift+enter newline  ·  / commands",
+                    "Enter 发送  ·  Shift+Enter 换行  ·  / 命令",
                     id="shortcut-label",
                 )
                 yield Static("", id="model-label")
@@ -1057,6 +1057,7 @@ class VelaCodeApp(App):
                 "render_restored": self._render_restored_messages,
                 "skill_loader": self.skill_loader,
                 "skill_executor": self.skill_executor,
+                "exit_app": self._exit_from_command,
             },
         )
 
@@ -2015,6 +2016,16 @@ class VelaCodeApp(App):
         except Exception:
             pass
         self.exit()
+
+    async def _exit_from_command(self) -> None:
+        """让 /exit 在有回复生成时也能直接执行完整退出流程。"""
+        if self._streaming:
+            if self._agent_task and not self._agent_task.done():
+                if self.agent is not None:
+                    self.agent.cancel("Application exit requested")
+                self._agent_task.cancel()
+            self._finish_streaming()
+        await self.action_handle_ctrl_c()
 
     def _show_error(self, text: str) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)

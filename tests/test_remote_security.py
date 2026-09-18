@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import websockets
@@ -89,3 +90,24 @@ async def test_live_websocket_handshake_enforces_token() -> None:
         ) as websocket:
             message = json.loads(await websocket.recv())
             assert message["type"] == "connected"
+
+
+@pytest.mark.asyncio
+async def test_remote_shutdown_releases_resources_after_startup_error() -> None:
+    server = RemoteServer(providers=[])
+    server.mcp_manager = AsyncMock()
+    server.mcp_manager.shutdown.side_effect = RuntimeError("MCP close failed")
+    server.registry = AsyncMock()
+    server.hook_engine = AsyncMock()
+    server.session = MagicMock()
+    with (
+        patch.object(server, "_init_agent"),
+        patch.object(server, "_init_mcp", new_callable=AsyncMock) as init_mcp,
+    ):
+        init_mcp.side_effect = RuntimeError("startup failed")
+        with pytest.raises(RuntimeError, match="startup failed"):
+            await server.run()
+
+    server.registry.release_session.assert_awaited_once()
+    server.hook_engine.shutdown.assert_awaited_once()
+    server.session.close.assert_called_once()

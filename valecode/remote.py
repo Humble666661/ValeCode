@@ -137,31 +137,52 @@ class RemoteServer:
 
     async def run(self) -> None:
         """启动 HTTP + WebSocket 服务器。"""
-        # 初始化 Agent
-        self._init_agent()
-
-        # 初始化 MCP（如果有配置）
-        await self._init_mcp()
-
-        display_host = "localhost" if _is_loopback_bind(self.addr) else self.addr
         try:
-            if ipaddress.ip_address(display_host).version == 6:
-                display_host = f"[{display_host}]"
-        except ValueError:
-            pass
-        auth_note = " (Token required)" if self.auth_token else ""
-        print(f"\n  Remote UI: http://{display_host}:{self.port}{auth_note}\n")
+            self._init_agent()
+            await self._init_mcp()
 
-        # websockets 的 serve 支持 process_request 回调来处理普通 HTTP
-        async with websockets.serve(
-            self._ws_handler,
-            self.addr,
-            self.port,
-            process_request=self._process_http_request,
-            max_size=4 * 1024 * 1024,  # 4MB 消息上限
-        ):
-            # 服务器启动后永久阻塞
-            await asyncio.Future()
+            display_host = "localhost" if _is_loopback_bind(self.addr) else self.addr
+            try:
+                if ipaddress.ip_address(display_host).version == 6:
+                    display_host = f"[{display_host}]"
+            except ValueError:
+                pass
+            auth_note = " (Token required)" if self.auth_token else ""
+            print(f"\n  Remote UI: http://{display_host}:{self.port}{auth_note}\n")
+
+            # websockets 的 serve 支持 process_request 回调来处理普通 HTTP
+            async with websockets.serve(
+                self._ws_handler,
+                self.addr,
+                self.port,
+                process_request=self._process_http_request,
+                max_size=4 * 1024 * 1024,  # 4MB 消息上限
+            ):
+                # 服务器启动后永久阻塞
+                await asyncio.Future()
+        finally:
+            await self._shutdown()
+
+    async def _shutdown(self) -> None:
+        """Release remote runtime resources even on startup failure/cancellation."""
+        if self.mcp_manager is not None:
+            try:
+                await self.mcp_manager.shutdown()
+            except Exception:
+                log.exception("Failed to close MCP manager")
+            self.mcp_manager = None
+        if self.registry is not None:
+            try:
+                await self.registry.release_session()
+            except Exception:
+                log.exception("Failed to release remote tool session")
+        if self.hook_engine is not None:
+            try:
+                await self.hook_engine.shutdown()
+            except Exception:
+                log.exception("Failed to close remote hook engine")
+        if self.session is not None:
+            self.session.close()
 
     # ------------------------------------------------------------------
     # HTTP 请求处理（为 / 路径提供前端 HTML）

@@ -104,7 +104,9 @@ def main() -> None:
 
     if args.p is not None:
         output_format = getattr(args, "output_format", "text")
-        asyncio.run(_run_prompt(config, permission_mode, hook_engine, args.p, output_format))
+        asyncio.run(_run_prompt_with_cleanup(
+            config, permission_mode, hook_engine, args.p, output_format,
+        ))
         return
 
     # Remote 模式：默认只监听回环地址；非回环监听必须配置访问 Token。
@@ -144,6 +146,16 @@ def main() -> None:
         sandbox_config=config.sandbox,
     )
     app.run()
+
+
+async def _run_prompt_with_cleanup(
+    config, permission_mode, hook_engine, prompt: str, output_format: str,
+) -> None:
+    try:
+        await _run_prompt(config, permission_mode, hook_engine, prompt, output_format)
+    finally:
+        if hook_engine is not None:
+            await hook_engine.shutdown()
 
 
 async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_format: str = "text") -> None:

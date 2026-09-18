@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from valecode.__main__ import _configure_logging, main
+from valecode.__main__ import _configure_logging, _run_prompt_with_cleanup, main
 
 
 def test_help_does_not_touch_state_directory(
@@ -37,3 +37,13 @@ def test_logging_falls_back_when_project_state_directory_is_unwritable(
     assert log_path == fallback / "debug.log"
     assert fallback.is_dir()
     assert basic_config.call_args.kwargs["filename"] == str(log_path)
+
+
+@pytest.mark.asyncio
+async def test_prompt_mode_shuts_down_hooks_even_on_error() -> None:
+    hooks = AsyncMock()
+    with patch("valecode.__main__._run_prompt", new_callable=AsyncMock) as run_prompt:
+        run_prompt.side_effect = RuntimeError("prompt failed")
+        with pytest.raises(RuntimeError, match="prompt failed"):
+            await _run_prompt_with_cleanup(None, None, hooks, "test", "text")
+    hooks.shutdown.assert_awaited_once()

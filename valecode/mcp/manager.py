@@ -110,6 +110,16 @@ class MCPManager:
 
         return client
 
+    def tool_names_for_server(self, server_name: str) -> list[str]:
+        """Use registry ownership, not a guessed tool-name prefix."""
+        if self._registry is None:
+            return []
+        scope_id = f"mcp:{server_name}"
+        return [
+            entry.name for entry in self._registry.list_registrations()
+            if entry.source == ToolSource.MCP and entry.scope_id == scope_id
+        ]
+
 
     async def shutdown(self) -> None:
         registry = self._registry

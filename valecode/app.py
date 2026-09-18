@@ -1920,10 +1920,7 @@ class ValeCodeApp(App):
                     section += srv_info.instructions
                 else:
                     # 回退：列出该服务器注册的工具名
-                    tool_names = [
-                        t.name for t in self.registry.list_tools()
-                        if t.name.startswith(f"mcp__{srv_info.name}__")
-                    ]
+                    tool_names = manager.tool_names_for_server(srv_info.name)
                     if tool_names:
                         section += "Available tools: " + ", ".join(tool_names)
                 parts.append(section)

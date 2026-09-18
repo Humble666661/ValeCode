@@ -82,10 +82,6 @@ COORDINATOR_MODE_ALLOWED_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def _is_mcp_tool(name: str) -> bool:
-    return name.startswith("mcp__")
-
-
 def resolve_agent_tools(
     parent_registry: ToolRegistry,
     definition: AgentDef,
@@ -101,7 +97,6 @@ def resolve_agent_tools(
             (registration := parent_registry.get_registration(name)) is not None
             and registration.source == ToolSource.MCP
         )
-        or _is_mcp_tool(name)
     }
     all_tools = {name: tool for name, tool in all_tools.items() if name not in mcp_tools}
 
@@ -233,6 +228,6 @@ def apply_coordinator_filter(registry: ToolRegistry) -> ToolRegistry:
         registration = registry.get_registration(name)
         if (
             registration is not None and registration.source == ToolSource.MCP
-        ) or _is_mcp_tool(name) or name in COORDINATOR_MODE_ALLOWED_TOOLS:
+        ) or name in COORDINATOR_MODE_ALLOWED_TOOLS:
             registry.copy_registration_to(filtered, name)
     return filtered

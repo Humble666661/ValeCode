@@ -297,3 +297,20 @@ class TestMCPManagerPartialFailure:
         assert len(result.errors) == 1
         assert "bad" in result.errors[0]
         assert registry.get("mcp_good_test_tool") is not None
+        assert manager.tool_names_for_server("good") == ["mcp_good_test_tool"]
+        assert manager.tool_names_for_server("bad") == []
+
+        from valecode.commands.handlers.mcp import handle_mcp
+        from valecode.commands.registry import CommandContext
+
+        ui = MagicMock()
+        ui.mcp_manager = manager
+        ui._mcp_server_info = "Connected to 1 MCP server(s), 1 tools registered"
+        context = CommandContext(
+            args="", agent=None, conversation=None, session=None,
+            session_manager=None, memory_manager=None, ui=ui, config={},
+        )
+        await handle_mcp(context)
+        status = ui.add_system_message.call_args.args[0]
+        assert "good: 1 tools" in status
+        assert "- test_tool" in status

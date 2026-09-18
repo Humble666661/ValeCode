@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +70,50 @@ class RelevantMemory:
 class MemoryRecallResult:
     text: str
     paths: list[str]
+
+
+class SurfacedMemoryStore:
+    """Persist per-session recall de-duplication outside compacted history."""
+
+    def __init__(self, work_dir: str | Path, session_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+            raise ValueError("Invalid session ID for memory recall")
+        root = Path(work_dir).resolve()
+        state_dir = (root / ".valecode" / "memory-recall").resolve()
+        if not state_dir.is_relative_to(root):
+            raise ValueError("Memory recall directory escapes the project")
+        self.path = state_dir / f"{session_id}.json"
+
+    def load(self) -> set[str]:
+        if self.path.is_symlink():
+            raise ValueError("Memory recall file must not be a symlink")
+        if not self.path.exists():
+            return set()
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        paths = raw.get("paths") if isinstance(raw, dict) and raw.get("version") == 1 else None
+        if not isinstance(paths, list) or len(paths) > 5000 or any(
+            not isinstance(path, str) or not path or len(path) > 4096 for path in paths
+        ):
+            raise ValueError("Invalid memory recall state")
+        return set(paths)
+
+    def save(self, paths: set[str]) -> None:
+        if self.path.is_symlink():
+            raise ValueError("Memory recall file must not be a symlink")
+        if len(paths) > 5000 or any(
+            not isinstance(path, str) or not path or len(path) > 4096 for path in paths
+        ):
+            raise ValueError("Invalid memory recall paths")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps({"version": 1, "paths": sorted(paths)}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

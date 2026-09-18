@@ -438,7 +438,8 @@ class Agent:
         self.todo_state_provider: Callable[[], str] | None = None
         self.file_history: Any = None
 
-        # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入
+        # Memory recall starts during UI preparation and is available to the
+        # first model call, including requests that never invoke a tool.
         self.memory_recall_task: Any | None = None
         self._memory_recall_consumed: bool = False
         self.memory_recall_on_surfaced: Callable[[list[str]], None] | None = None
@@ -453,6 +454,9 @@ class Agent:
         """Inject a completed recall and mark only actually injected files."""
         task = self.memory_recall_task
         if task is None or self._memory_recall_consumed or not task.done():
+            return
+        if task.cancelled():
+            self._memory_recall_consumed = True
             return
         try:
             recall = task.result()
@@ -1300,6 +1304,16 @@ class Agent:
                 )
                 break
 
+            if iteration == 1 and self.memory_recall_task is not None:
+                try:
+                    await self.memory_recall_task
+                except asyncio.CancelledError:
+                    if not self.memory_recall_task.cancelled():
+                        raise
+                except Exception:
+                    pass  # Best-effort recall cannot stop the main request.
+                self._consume_memory_recall(conversation)
+
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_start")
                 await self.hook_engine.run_hooks("turn_start", ctx)
@@ -1713,7 +1727,7 @@ class Agent:
                 event_payload={"tool_call_count": len(response.tool_calls)},
             )
 
-            # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
+            # Also cover callers that attach a recall task after the first send.
             self._consume_memory_recall(conversation)
 
             if exit_plan_called:

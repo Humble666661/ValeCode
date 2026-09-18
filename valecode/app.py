@@ -58,7 +58,11 @@ from valecode.memory import (
     load_instructions,
     make_compact_boundary,
 )
-from valecode.memory.recall import MemoryRecallResult, render_reminder_with_paths
+from valecode.memory.recall import (
+    MemoryRecallResult,
+    SurfacedMemoryStore,
+    render_reminder_with_paths,
+)
 from valecode.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -1269,6 +1273,28 @@ class ValeCodeApp(App):
                         return list(reversed(names))
         return list(reversed(names))
 
+    def _get_surfaced_memories(self, session_id: str) -> set[str]:
+        if session_id not in self._surfaced_memories:
+            paths: set[str] = set()
+            if self.agent is not None and session_id:
+                try:
+                    paths = SurfacedMemoryStore(self.agent.work_dir, session_id).load()
+                except (OSError, ValueError):
+                    pass  # Recall is best-effort; corrupt state cannot block chat.
+            self._surfaced_memories[session_id] = paths
+        return self._surfaced_memories[session_id]
+
+    def _mark_surfaced_memories(self, session_id: str, paths: list[str]) -> None:
+        if not paths:
+            return
+        surfaced = self._get_surfaced_memories(session_id)
+        surfaced.update(paths)
+        if self.agent is not None and session_id:
+            try:
+                SurfacedMemoryStore(self.agent.work_dir, session_id).save(surfaced)
+            except (OSError, ValueError):
+                pass  # In-process de-duplication still works if persistence fails.
+
     async def _prefetch_relevant_memories(self, query: str) -> MemoryRecallResult:
         """Run the recall selector as a side-query with an 8s timeout.
 
@@ -1283,7 +1309,7 @@ class ValeCodeApp(App):
         user_dir = self.memory_manager.user_mem_dir
         project_dir = self.memory_manager.project_mem_dir
         session_id = self.session.session_id if self.session else ""
-        surfaced = set(self._surfaced_memories.get(session_id, set()))
+        surfaced = set(self._get_surfaced_memories(session_id))
         recent_tools = self._recent_tool_names()
 
         async def selector(system_prompt: str, user_message: str) -> str:
@@ -1380,14 +1406,14 @@ class ValeCodeApp(App):
             self.conversation.add_system_reminder(self._mcp_instructions)
             self._mcp_instructions_ok = True
 
-        # 非阻塞 memory recall：传给 agent，工具执行后注入（与 Claude Code 一致）
+        # The first model call waits for this bounded prefetch so even a
+        # no-tool answer can use relevant memories.
         if prefetch_task is not None:
             self.agent.memory_recall_task = prefetch_task
             self.agent._memory_recall_consumed = False
             session_id = self.session.session_id if self.session else ""
             self.agent.memory_recall_on_surfaced = (
-                lambda paths, sid=session_id: self._surfaced_memories
-                .setdefault(sid, set()).update(paths)
+                lambda paths, sid=session_id: self._mark_surfaced_memories(sid, paths)
             )
 
         history_cursor = len(self.conversation.history)

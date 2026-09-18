@@ -37,6 +37,7 @@ from valecode.permissions import (
     mode_decide,
     parse_rule,
 )
+from valecode.permissions.dangerous import is_safe_command
 from valecode.tools import create_default_registry
 from valecode.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
 
@@ -100,6 +101,24 @@ class TestDangerousCommandDetector:
     def test_safe_ls(self) -> None:
         hit, _ = self.detector.detect("ls -la")
         assert not hit
+
+
+@pytest.mark.parametrize("command", [
+    "npx evil-package", "tee out.txt", "sed -i x file.txt",
+    "awk 'BEGIN { system(\"touch out\") }'", "find . -exec touch out \\;",
+    "git branch -D main", "git diff --output=out.patch",
+    "ls /outside", "ls & touch out", "ls\ntouch out",
+    "echo hi > out", "pwd < file", "ls $(touch out)",
+])
+def test_mutating_or_composed_commands_are_not_auto_allowed(command: str) -> None:
+    assert not is_safe_command(command)
+
+
+@pytest.mark.parametrize("command", [
+    "pwd", "ls", "ls -la", "git status", "git status --short",
+])
+def test_small_read_only_commands_remain_auto_allowed(command: str) -> None:
+    assert is_safe_command(command)
 
 # ===========================================================================
 # 第二层：PathSandbox（路径沙箱）
@@ -326,6 +345,16 @@ class TestPermissionChecker:
         from valecode.tools.bash import Bash
         tool = Bash()
         d = self.checker.check(tool, {"command": "npm test"})
+        assert d.effect == "ask"
+
+    @pytest.mark.parametrize("command", [
+        "npx evil-package", "tee out.txt", "git branch -D main",
+        "ls /outside", "ls & touch out",
+    ])
+    def test_mutating_bash_does_not_bypass_approval(self, command: str) -> None:
+        from valecode.tools.bash import Bash
+
+        d = self.checker.check(Bash(), {"command": command})
         assert d.effect == "ask"
 
     def test_plan_mode_asks_write(self) -> None:

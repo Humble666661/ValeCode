@@ -15,31 +15,34 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-_SAFE_COMMANDS = frozenset({
-    "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc",
-    "find", "which", "whereis", "whoami", "hostname", "uname",
-    "date", "cal", "uptime", "df", "du", "free", "env", "printenv",
-    "file", "stat", "readlink", "realpath", "basename", "dirname",
-    "sort", "uniq", "tr", "cut", "awk", "sed", "grep", "egrep", "fgrep",
-    "diff", "comm", "tee", "xargs", "true", "false", "test",
-    "git status", "git log", "git diff", "git show", "git branch",
-    "git tag", "git remote", "git rev-parse", "git ls-files",
-    "git blame", "git stash list", "go version", "go env",
-    "node -v", "npm -v", "npx", "python --version", "pip list",
-    "cargo --version", "rustc --version", "java -version", "java --version",
+_SAFE_EXACT_COMMANDS = frozenset({
+    "pwd", "whoami", "hostname", "uname", "date", "uptime",
+    "true", "false", "git status", "git log", "git diff",
+    "git show", "git stash list", "go version", "node -v",
+    "npm -v", "python --version", "cargo --version",
+    "rustc --version", "java -version", "java --version",
 })
+
+_SAFE_LIST_FLAGS = frozenset({"-a", "-l", "-la", "-al", "-h", "-lh", "-lah", "-alh"})
+_SAFE_GIT_STATUS_FLAGS = frozenset({"--short", "--branch", "--porcelain", "-sb"})
 
 
 def is_safe_command(command: str) -> bool:
     trimmed = command.strip()
     if not trimmed:
         return False
-    for ch in ("|", ";", "&&", ">", "$(", "`"):
-        if ch in trimmed:
-            return False
-    for safe in _SAFE_COMMANDS:
-        if trimmed == safe or trimmed.startswith(safe + " "):
-            return True
+    # This is an auto-allow list, not a command parser. Anything with shell
+    # composition, expansion or redirection must go through normal approval.
+    if any(ch in trimmed for ch in "|;&><`$\r\n\\"):
+        return False
+    normalized = " ".join(trimmed.split())
+    if normalized in _SAFE_EXACT_COMMANDS:
+        return True
+    parts = normalized.split(" ")
+    if parts[0] in ("ls", "dir"):
+        return all(part in _SAFE_LIST_FLAGS for part in parts[1:])
+    if parts[:2] == ["git", "status"]:
+        return all(part in _SAFE_GIT_STATUS_FLAGS for part in parts[2:])
     return False
 
 

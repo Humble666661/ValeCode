@@ -58,6 +58,22 @@ class TestDangerousCommandDetector:
         hit, _ = self.detector.detect("rm -rf /")
         assert hit
 
+    @pytest.mark.parametrize("command", [
+        "rm -fr /", "rm -r -f /", "rm --recursive --force /",
+        "rm -rf -- '/'", "rm -r /*", "rm -rf /tmp/..",
+        "echo ok && rm -rf / && echo done", "sudo rm -rf /",
+    ])
+    def test_root_delete_variants_denied(self, command: str) -> None:
+        hit, _ = self.detector.detect(command)
+        assert hit
+
+    @pytest.mark.parametrize("command", [
+        "rm -rf build/", "rm -r /tmp/project", "rm -f /",
+    ])
+    def test_non_root_or_non_recursive_rm_not_categorically_denied(self, command: str) -> None:
+        hit, _ = self.detector.detect(command)
+        assert not hit
+
     def test_mkfs(self) -> None:
         hit, _ = self.detector.detect("mkfs.ext4 /dev/sda1")
         assert hit

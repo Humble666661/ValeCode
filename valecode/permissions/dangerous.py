@@ -1,7 +1,9 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
+import shlex
 
 _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/\s*$"), "递归强制删除根目录"),
@@ -57,7 +59,45 @@ class DangerousCommandDetector:
 
 
     def detect(self, command: str) -> tuple[bool, str]:
+        if _deletes_posix_root(command):
+            return True, "递归删除根目录"
         for pattern, reason in self._patterns:
             if pattern.search(command):
                 return True, reason
         return False, ""
+
+
+def _deletes_posix_root(command: str) -> bool:
+    """Catch common rm flag/order/quoting variants targeting / or /*.
+
+    This is a catastrophic-operation guard, not a general shell parser. Other
+    commands still go through the normal permission decision pipeline.
+    """
+    for segment in re.split(r"&&|\|\||[;|\r\n]", command):
+        try:
+            parts = shlex.split(segment)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+        if parts[0] in ("sudo", "command"):
+            parts = parts[1:]
+        if not parts or parts[0] != "rm":
+            continue
+        recursive = False
+        targets: list[str] = []
+        options_done = False
+        for part in parts[1:]:
+            if part == "--" and not options_done:
+                options_done = True
+            elif not options_done and part.startswith("--"):
+                recursive |= part == "--recursive"
+            elif not options_done and part.startswith("-"):
+                recursive |= "r" in part[1:] or "R" in part[1:]
+            else:
+                targets.append(part)
+        if recursive and any(
+            posixpath.normpath(target) in ("/", "/*") for target in targets
+        ):
+            return True
+    return False

@@ -17,6 +17,7 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "AskUserQuestion",
     "TaskStop",
     "Workflow",
+    "TodoWrite",
 })
 
 CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
@@ -32,7 +33,6 @@ CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
 ASYNC_AGENT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "ReadFile",
     "WebSearch",
-    "TodoWrite",
     "Grep",
     "WebFetch",
     "Glob",
@@ -195,7 +195,7 @@ def build_teammate_tools(
 
 
 def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
-    """Fork 专用：复制父注册表的全部工具，不做任何过滤。
+    """Fork 专用：复制父注册表的工具，但不共享父会话 TodoWrite。
 
     遇到 AgentTool 实例时浅复制并标记 query_source，
     确保 fork 子 Agent 不能再次 fork（运行时拦截），
@@ -207,6 +207,8 @@ def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
 
     forked = ToolRegistry()
     for tool in parent_registry.list_tools():
+        if tool.name == "TodoWrite":
+            continue
         if tool.name == "Agent" and hasattr(tool, "query_source"):
             clone = copy.copy(tool)
             clone.query_source = FORK_QUERY_SOURCE

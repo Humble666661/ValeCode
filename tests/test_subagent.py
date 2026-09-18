@@ -274,7 +274,7 @@ class TestAgentLoader:
 class TestToolFilter:
 
     def test_global_disallowed(self):
-        reg = make_registry("ReadFile", "Agent", "Bash", "AskUserQuestion")
+        reg = make_registry("ReadFile", "Agent", "Bash", "AskUserQuestion", "TodoWrite")
         definition = AgentDef(
             agent_type="test", when_to_use="test", source="builtin"
         )
@@ -282,6 +282,7 @@ class TestToolFilter:
         names = {t.name for t in filtered.list_tools()}
         assert "Agent" not in names
         assert "AskUserQuestion" not in names
+        assert "TodoWrite" not in names
         assert "ReadFile" in names
         assert "Bash" in names
 
@@ -328,6 +329,13 @@ class TestToolFilter:
         )
         filtered = resolve_agent_tools(reg, definition, is_background=True)
         assert {tool.name for tool in filtered.list_tools()} == {"ReadFile"}
+
+    def test_fork_does_not_share_parent_session_todos(self):
+        from valecode.agents.tool_filter import clone_registry_for_fork
+
+        reg = make_registry("ReadFile", "TodoWrite")
+        forked = clone_registry_for_fork(reg)
+        assert {tool.name for tool in forked.list_tools()} == {"ReadFile"}
 
     def test_combined_whitelist_and_blacklist(self):
         reg = make_registry("ReadFile", "EditFile", "WriteFile", "Bash", "Grep")

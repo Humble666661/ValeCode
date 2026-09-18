@@ -256,6 +256,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         model=provider.model,
     )
     agent.session_id = session.session_id
+    from valecode.tools.todo_write import TodoWrite
+
+    todo_tool = TodoWrite(lambda: (agent.work_dir, session.session_id))
+    registry.register(todo_tool)
+    agent.set_todo_state_provider(todo_tool.current_summary)
 
     wt_cfg = config.worktree or WorktreeConfig()
     wt_manager = WorktreeManager(

@@ -435,6 +435,7 @@ class Agent:
         self.team_name: str = ""
         self._team_manager: Any = None
         self.notification_fn: Callable[[], list[str]] | None = None
+        self.todo_state_provider: Callable[[], str] | None = None
         self.file_history: Any = None
 
         # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入
@@ -498,6 +499,19 @@ class Agent:
 
     def set_skill_catalog(self, catalog: str) -> None:
         self._skill_catalog = catalog
+
+    def set_todo_state_provider(self, provider: Callable[[], str]) -> None:
+        self.todo_state_provider = provider
+
+    def _system_with_todo_progress(self, system: str) -> str:
+        if self.todo_state_provider is None:
+            return system
+        try:
+            progress = self.todo_state_provider()
+        except Exception:
+            log.exception("Unable to load current task progress")
+            return system
+        return system + "\n\n# Current task progress\n" + progress if progress else system
 
 
     def set_agent_catalog(self, catalog: str, catalog_list: list[tuple[str, str]] | None = None) -> None:
@@ -1291,6 +1305,7 @@ class Agent:
                 coordinator_mode=self.coordinator_mode,
                 agent_catalog=self._agent_catalog_list or None,
             )
+            system = self._system_with_todo_progress(system)
 
             if self.plan_mode:
                 plan_path = str(self._get_plan_path())
@@ -2252,7 +2267,7 @@ class Agent:
             self._start_control_step(iteration)
             collector = StreamCollector()
             async for _event in self._consume_llm_stream(
-                collector, api_conversation, system, tools
+                collector, api_conversation, self._system_with_todo_progress(system), tools
             ):
                 pass
 

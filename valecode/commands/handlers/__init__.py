@@ -14,6 +14,7 @@ from valecode.commands.handlers.session import SESSION_COMMAND
 from valecode.commands.handlers.skill import SKILL_COMMAND
 from valecode.commands.handlers.rewind import REWIND_COMMAND
 from valecode.commands.handlers.status import STATUS_COMMAND
+from valecode.commands.handlers.todos import TODOS_COMMAND
 from valecode.commands.registry import CommandRegistry
 
 
@@ -30,6 +31,7 @@ ALL_COMMANDS = [
     SANDBOX_COMMAND,
     REWIND_COMMAND,
     STATUS_COMMAND,
+    TODOS_COMMAND,
     SKILL_COMMAND,
 ]
 

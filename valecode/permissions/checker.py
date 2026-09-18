@@ -9,6 +9,7 @@ from valecode.permissions.modes import DecisionEffect, PermissionMode, mode_deci
 from valecode.permissions.rules import RuleEngine, extract_content, parse_rule
 from valecode.permissions.sandbox import PathSandbox
 from valecode.tools.base import Tool
+from valecode.tools.todo_write import TodoWrite
 
 _PLAN_MODE_ALLOWED_TOOLS = frozenset({"Agent", "ToolSearch", "AskUserQuestion", "ExitPlanMode"})
 
@@ -176,6 +177,12 @@ class PermissionChecker:
                 effect=scoped_result,
                 reason=f"Skill 权限作用域 {scoped_result}",
             )
+
+        # The built-in TodoWrite only updates this session's local progress
+        # metadata. Keep explicit user/project deny/ask rules above authoritative
+        # while avoiding a permission prompt for every checklist update.
+        if isinstance(tool, TodoWrite):
+            return Decision(effect="allow", reason="内置会话任务进度更新")
 
         # Layer 4b: 会话级放行（内存中，优先于模式兜底）
         if self._check_session_allowed(permission_name, content or ""):

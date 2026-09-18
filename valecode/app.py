@@ -796,6 +796,13 @@ class ValeCodeApp(App):
         )
         self.agent.file_history = self.file_history
         self.agent.session_id = self.session.session_id
+        from valecode.tools.todo_write import TodoWrite
+
+        todo_tool = TodoWrite(
+            lambda: (self.agent.work_dir, self.session.session_id)
+        )
+        self.registry.register(todo_tool)
+        self.agent.set_todo_state_provider(todo_tool.current_summary)
 
         self._exit_plan_tool._is_plan_mode = lambda: self.agent.plan_mode
         self._exit_plan_tool._plan_exists = lambda: self.agent._get_plan_path().exists()

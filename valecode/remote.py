@@ -365,6 +365,11 @@ class RemoteServer:
             model=provider.model,
         )
         self.agent.session_id = self.session_id
+        from valecode.tools.todo_write import TodoWrite
+
+        todo_tool = TodoWrite(lambda: (self.agent.work_dir, self.session_id))
+        self.registry.register(todo_tool)
+        self.agent.set_todo_state_provider(todo_tool.current_summary)
 
         # 连接 Skill 到 Agent
         load_skill_tool.set_loader(self.skill_loader)

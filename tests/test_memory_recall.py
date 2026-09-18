@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +16,11 @@ from valecode.memory.recall import (
     MemoryRecallResult,
     RelevantMemory,
     SurfacedMemoryStore,
+    find_relevant_memories,
     render_reminder_with_paths,
+    scan_memory_files,
 )
+from valecode.memory.search_index import MemorySearchIndex
 from valecode.tools import create_default_registry
 from valecode.tools.base import StreamEnd, TextDelta
 
@@ -47,6 +51,95 @@ def test_surfaced_state_survives_restart_and_rejects_bad_session(tmp_path: Path)
     store.path.write_text("not json", encoding="utf-8")
     with pytest.raises(ValueError):
         store.load()
+
+
+def test_search_index_chinese_and_incremental_sync(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    phone = memory_dir / "phone.md"
+    phone.write_text("---\ndescription: 苹果手机问题\n---\n\n检查充电接口", encoding="utf-8")
+    other = memory_dir / "other.md"
+    other.write_text("记住数据库迁移步骤", encoding="utf-8")
+    index = MemorySearchIndex(tmp_path)
+    headers = scan_memory_files(memory_dir, "project")
+    assert index.rank("苹果手机", headers)[0] == str(phone.resolve())
+    assert index.path.exists()
+
+    phone.write_text("现在改为数据库迁移记录，附加详细步骤", encoding="utf-8")
+    headers = scan_memory_files(memory_dir, "project")
+    assert str(phone.resolve()) not in index.rank("苹果手机", headers)
+    assert str(phone.resolve()) in index.rank("数据库迁移", headers)
+
+    phone.unlink()
+    headers = scan_memory_files(memory_dir, "project")
+    assert str(phone.resolve()) not in index.rank("数据库迁移", headers)
+
+
+@pytest.mark.asyncio
+async def test_large_manifest_uses_index_and_accepts_absolute_path(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    for number in range(85):
+        (memory_dir / f"note-{number}.md").write_text(
+            f"普通备忘录 {number}", encoding="utf-8"
+        )
+    target = memory_dir / "special.md"
+    target.write_text("特有的火星传感器校准记录", encoding="utf-8")
+    observed = {}
+
+    async def selector(_system: str, message: str) -> str:
+        observed["message"] = message
+        return '{"selected_memories": ["' + str(target.resolve()).replace("\\", "\\\\") + '"]}'
+
+    result = await find_relevant_memories(
+        "火星传感器",
+        user_mem_dir=None,
+        project_mem_dir=memory_dir,
+        recent_tools=None,
+        already_surfaced=None,
+        selector=selector,
+        index=MemorySearchIndex(tmp_path),
+    )
+    assert [memory.path for memory in result] == [str(target.resolve())]
+    assert str(target.resolve()) in observed["message"]
+    assert observed["message"].count(".md") < 50
+
+    class BrokenIndex:
+        def rank(self, *_args):
+            raise sqlite3.DatabaseError("damaged derived index")
+
+    fallback = await find_relevant_memories(
+        "火星传感器", None, memory_dir, None, None, selector,
+        index=BrokenIndex(),
+    )
+    assert [memory.path for memory in fallback] == [str(target.resolve())]
+    assert observed["message"].count(".md") >= 86
+
+
+@pytest.mark.asyncio
+async def test_same_name_across_scopes_requires_absolute_selection(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user"
+    project_dir = tmp_path / "project"
+    user_dir.mkdir()
+    project_dir.mkdir()
+    (user_dir / "same.md").write_text("user memory", encoding="utf-8")
+    selected = project_dir / "same.md"
+    selected.write_text("project memory", encoding="utf-8")
+
+    async def ambiguous(_system: str, _message: str) -> str:
+        return '{"selected_memories": ["same.md"]}'
+
+    kwargs = dict(
+        query="memory", user_mem_dir=user_dir, project_mem_dir=project_dir,
+        recent_tools=None, already_surfaced=None,
+    )
+    assert await find_relevant_memories(**kwargs, selector=ambiguous) == []
+
+    async def absolute(_system: str, _message: str) -> str:
+        return '{"selected_memories": ["' + str(selected.resolve()).replace("\\", "\\\\") + '"]}'
+
+    result = await find_relevant_memories(**kwargs, selector=absolute)
+    assert [memory.path for memory in result] == [str(selected.resolve())]
 
 
 @pytest.mark.asyncio

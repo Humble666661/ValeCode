@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+from collections import Counter
 import json
 import os
 import re
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
+
+from valecode.memory.search_index import MemorySearchIndex
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +295,7 @@ async def find_relevant_memories(
     recent_tools: list[str] | None,
     already_surfaced: set[str] | None,
     selector: SelectorFn,
+    index: MemorySearchIndex | None = None,
 ) -> list[RelevantMemory]:
     """Scan both dirs, filter already-surfaced, ask selector to pick up to 5
     relevant filenames, and return the corresponding paths + mtimes.
@@ -308,20 +314,43 @@ async def find_relevant_memories(
     if not candidates:
         return []
 
+    # Keep small manifests complete. For large stores, shortlist lexical hits
+    # and a few recent files so the LLM selector stays within a modest budget.
+    if index is not None and len(candidates) > 80:
+        try:
+            # Ask for all indexed matches before filtering surfaced paths;
+            # otherwise the top hits may all be memories this session saw.
+            ranked = await asyncio.to_thread(index.rank, query, all_headers, len(all_headers))
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            ranked = []  # The Markdown files are authoritative.
+        if ranked:
+            by_path = {header.file_path: header for header in candidates}
+            shortlist = [by_path[path] for path in ranked if path in by_path][:40]
+            seen = {header.file_path for header in shortlist}
+            shortlist.extend(
+                header for header in candidates[:8] if header.file_path not in seen
+            )
+            candidates = shortlist
+
     selected_filenames = await _select_relevant_memories(
         query, candidates, recent_tools, selector
     )
 
-    # Build lookup from both file_path and filename to header.
+    # Absolute paths are unambiguous; relative names are accepted only when
+    # they do not collide across user/project scopes.
     by_key: dict[str, MemoryHeader] = {}
+    name_counts = Counter(m.filename for m in candidates)
     for m in candidates:
         by_key[m.file_path] = m
-        by_key.setdefault(m.filename, m)
+        if name_counts[m.filename] == 1:
+            by_key[m.filename] = m
 
     result: list[RelevantMemory] = []
+    seen_paths: set[str] = set()
     for fn in selected_filenames:
         m = by_key.get(fn)
-        if m is not None:
+        if m is not None and m.file_path not in seen_paths:
+            seen_paths.add(m.file_path)
             result.append(RelevantMemory(path=m.file_path, mtime_ms=m.mtime_ms))
     return result
 
@@ -333,7 +362,11 @@ async def _select_relevant_memories(
     selector: SelectorFn,
 ) -> list[str]:
     """Format manifest, call selector, parse JSON, return valid filenames."""
-    valid_filenames = {m.filename for m in memories}
+    name_counts = Counter(m.filename for m in memories)
+    valid_filenames = {m.file_path for m in memories}
+    valid_filenames.update(
+        m.filename for m in memories if name_counts[m.filename] == 1
+    )
 
     manifest = format_memory_manifest(memories)
 

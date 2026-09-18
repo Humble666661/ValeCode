@@ -63,6 +63,7 @@ from valecode.memory.recall import (
     SurfacedMemoryStore,
     render_reminder_with_paths,
 )
+from valecode.memory.search_index import MemorySearchIndex
 from valecode.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -1327,6 +1328,7 @@ class ValeCodeApp(App):
             return collected
 
         try:
+            index = MemorySearchIndex(self.agent.work_dir) if self.agent else None
             results = await asyncio.wait_for(
                 find_relevant_memories(
                     query=query,
@@ -1335,6 +1337,7 @@ class ValeCodeApp(App):
                     recent_tools=recent_tools,
                     already_surfaced=surfaced,
                     selector=selector,
+                    index=index,
                 ),
                 timeout=8.0,
             )

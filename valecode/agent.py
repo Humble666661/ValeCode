@@ -1482,7 +1482,11 @@ class Agent:
             batches = partition_tool_calls(response.tool_calls, self.registry)
 
             for batch in batches:
-                if batch.concurrent and len(batch.calls) > 1:
+                if (
+                    batch.concurrent
+                    and len(batch.calls) > 1
+                    and self._can_execute_batch_parallel(batch.calls)
+                ):
                     result_by_id: dict[str, _ToolExecResult] = {}
                     calls_to_execute: list[ToolCallComplete] = []
                     for tc in batch.calls:
@@ -1804,6 +1808,39 @@ class Agent:
     ) -> list[_ToolExecResult]:
         tasks = [self._execute_single_tool_direct(tc) for tc in calls]
         return list(await asyncio.gather(*tasks))
+
+    def _can_execute_batch_parallel(self, calls: list[ToolCallComplete]) -> bool:
+        """Use the direct path only when it cannot bypass a guard.
+
+        Permission prompts and hook notifications need the event-yielding serial
+        path. Already-approved calls can still run concurrently when no hooks
+        are installed; every call is checked before any one starts executing.
+        """
+        if self.hook_engine is not None:
+            return False
+        if self.permission_checker is None:
+            return True
+        for tc in calls:
+            tool = self.registry.get(tc.tool_name)
+            if tool is None or not self.registry.is_enabled(tc.tool_name):
+                return False
+            with self.tracing.span(
+                "permission.evaluate",
+                {
+                    **self._trace_attributes(),
+                    "tool.name": tc.tool_name,
+                    "tool.call_id": tc.tool_id,
+                    "permission.preflight": True,
+                },
+            ) as span:
+                decision = self.permission_checker.check(tool, tc.arguments)
+                span.set_attributes({
+                    "permission.effect": decision.effect,
+                    "permission.reason": decision.reason,
+                })
+            if decision.effect != "allow":
+                return False
+        return True
 
     async def _execute_tool(
         self, tc: ToolCallComplete

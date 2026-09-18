@@ -64,6 +64,12 @@ class RelevantMemory:
     mtime_ms: int
 
 
+@dataclass
+class MemoryRecallResult:
+    text: str
+    paths: list[str]
+
+
 # ---------------------------------------------------------------------------
 # Memory age helpers
 # ---------------------------------------------------------------------------
@@ -334,20 +340,26 @@ def render_reminder(memories: list[RelevantMemory]) -> str:
     """Read each selected memory file's full content and format a single
     system-reminder body with freshness headers.
     """
-    if not memories:
-        return ""
+    return render_reminder_with_paths(memories).text
 
-    parts: list[str] = []
-    parts.append("The following relevant memories from prior conversations may help:\n")
+
+def render_reminder_with_paths(memories: list[RelevantMemory]) -> MemoryRecallResult:
+    """Render a reminder and report only memory files actually read."""
+    if not memories:
+        return MemoryRecallResult("", [])
+
+    parts: list[str] = ["The following relevant memories from prior conversations may help:\n"]
+    paths: list[str] = []
     for mem in memories:
         try:
             content = Path(mem.path).read_text(encoding="utf-8")
         except OSError:
             continue  # skip unreadable files
+        paths.append(mem.path)
         basename = Path(mem.path).name
         parts.append(f"## Memory: {basename} (saved {memory_age(mem.mtime_ms)})\n")
         note = memory_freshness_text(mem.mtime_ms)
         if note:
             parts.append(note + "\n")
         parts.append(content + "\n\n---\n")
-    return "\n".join(parts)
+    return MemoryRecallResult("\n".join(parts) if paths else "", paths)

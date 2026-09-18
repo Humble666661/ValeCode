@@ -57,8 +57,8 @@ from valecode.memory import (
     generate_session_summary,
     load_instructions,
     make_compact_boundary,
-    render_reminder,
 )
+from valecode.memory.recall import MemoryRecallResult, render_reminder_with_paths
 from valecode.permissions import (
     DangerousCommandDetector,
     PathSandbox,
@@ -629,6 +629,7 @@ class ValeCodeApp(App):
         self.session_manager: SessionManager | None = None
         self.session: Session | None = None
         self.memory_manager: MemoryManager | None = None
+        self._surfaced_memories: dict[str, set[str]] = {}
         self._instructions_content: str = ""
         self.command_registry = CommandRegistry()
         register_all_commands(self.command_registry)
@@ -1255,19 +1256,35 @@ class ValeCodeApp(App):
             self.agent.cancel("Cancelled by user")
             self._agent_task.cancel()
 
-    async def _prefetch_relevant_memories(self, query: str) -> str:
+    def _recent_tool_names(self, limit: int = 10) -> list[str]:
+        """Most recent distinct tools, in execution order, for recall selection."""
+        names: list[str] = []
+        seen: set[str] = set()
+        for message in reversed(self.conversation.history):
+            for use in reversed(message.tool_uses):
+                if use.tool_name not in seen:
+                    seen.add(use.tool_name)
+                    names.append(use.tool_name)
+                    if len(names) >= limit:
+                        return list(reversed(names))
+        return list(reversed(names))
+
+    async def _prefetch_relevant_memories(self, query: str) -> MemoryRecallResult:
         """Run the recall selector as a side-query with an 8s timeout.
 
         Creates a fresh LLM client so the selector's system prompt is
         independent of the main conversation's system prompt. Returns the
-        rendered system-reminder body, or "" on any failure / timeout.
+        rendered reminder and paths, or an empty result on failure / timeout.
         """
         if self.memory_manager is None or self._selected_provider is None:
-            return ""
+            return MemoryRecallResult("", [])
 
         provider = self._selected_provider
         user_dir = self.memory_manager.user_mem_dir
         project_dir = self.memory_manager.project_mem_dir
+        session_id = self.session.session_id if self.session else ""
+        surfaced = set(self._surfaced_memories.get(session_id, set()))
+        recent_tools = self._recent_tool_names()
 
         async def selector(system_prompt: str, user_message: str) -> str:
             from valecode.tools.base import StreamEnd, TextDelta
@@ -1289,15 +1306,15 @@ class ValeCodeApp(App):
                     query=query,
                     user_mem_dir=user_dir,
                     project_mem_dir=project_dir,
-                    recent_tools=None,
-                    already_surfaced=None,
+                    recent_tools=recent_tools,
+                    already_surfaced=surfaced,
                     selector=selector,
                 ),
                 timeout=8.0,
             )
-            return render_reminder(results)
+            return render_reminder_with_paths(results)
         except (asyncio.TimeoutError, Exception):
-            return ""
+            return MemoryRecallResult("", [])
 
     def _refresh_skills_if_needed(self) -> None:
         """每轮对话前检查 skill 目录 modtime，有变化则自动 reload。"""
@@ -1367,6 +1384,11 @@ class ValeCodeApp(App):
         if prefetch_task is not None:
             self.agent.memory_recall_task = prefetch_task
             self.agent._memory_recall_consumed = False
+            session_id = self.session.session_id if self.session else ""
+            self.agent.memory_recall_on_surfaced = (
+                lambda paths, sid=session_id: self._surfaced_memories
+                .setdefault(sid, set()).update(paths)
+            )
 
         history_cursor = len(self.conversation.history)
 

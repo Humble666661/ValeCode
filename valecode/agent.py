@@ -441,12 +441,33 @@ class Agent:
         # 非阻塞 memory recall：prefetch task 与主 LLM 调用并行，工具执行后注入
         self.memory_recall_task: Any | None = None
         self._memory_recall_consumed: bool = False
+        self.memory_recall_on_surfaced: Callable[[list[str]], None] | None = None
 
     @property
     def _transcript_path(self) -> str:
         if self.session_id:
             return str(Path(self.work_dir) / ".valecode" / "sessions" / f"{self.session_id}.jsonl")
         return ""
+
+    def _consume_memory_recall(self, conversation: ConversationManager) -> None:
+        """Inject a completed recall and mark only actually injected files."""
+        task = self.memory_recall_task
+        if task is None or self._memory_recall_consumed or not task.done():
+            return
+        try:
+            recall = task.result()
+            if recall:
+                from valecode.memory.recall import MemoryRecallResult
+                if isinstance(recall, MemoryRecallResult):
+                    if recall.text:
+                        conversation.add_system_reminder(recall.text)
+                        if self.memory_recall_on_surfaced:
+                            self.memory_recall_on_surfaced(recall.paths)
+                else:
+                    conversation.add_system_reminder(recall)
+        except Exception:
+            pass  # Recall must not interrupt the main agent loop.
+        self._memory_recall_consumed = True
 
     @property
     def plan_mode(self) -> bool:
@@ -1693,15 +1714,7 @@ class Agent:
             )
 
             # 非阻塞 memory recall：工具执行完后检查 prefetch 是否就绪
-            if self.memory_recall_task and not self._memory_recall_consumed:
-                if self.memory_recall_task.done():
-                    try:
-                        recall = self.memory_recall_task.result()
-                        if recall:
-                            conversation.add_system_reminder(recall)
-                    except Exception:
-                        pass
-                    self._memory_recall_consumed = True
+            self._consume_memory_recall(conversation)
 
             if exit_plan_called:
                 yield TurnComplete(turn=iteration)

@@ -27,6 +27,7 @@ class Tool(ABC):
     is_concurrency_safe: bool = False
     is_system_tool: bool = False
     should_defer: bool = False
+    search_terms: tuple[str, ...] = ()
     uses_global_capacity: bool = True
     max_output_chars: int = MAX_OUTPUT_CHARS
 

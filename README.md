@@ -189,7 +189,7 @@ my_tools = "my_valecode_plugin:create_tools"
 Hooks、超时和输出预算路径；退出时会调用工具的 `close()`。加载错误会单独记录，
 不会阻止其他插件或 ValeCode 启动。Python 插件在当前进程中运行，拥有与 ValeCode
 相同的系统权限，因此只应安装和启用可信插件；需要进程隔离的外部工具应优先使用
-MCP。
+MCP。延迟工具可以通过 `search_terms = ("alias", "中文别名")` 声明额外检索词。
 
 ## 恢复与副作用语义
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect
 import itertools
 import logging
+import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import Any
 
@@ -242,31 +244,82 @@ class ToolRegistry:
     def search_deferred(
         self, query: str, max_results: int, protocol: str = "anthropic"
     ) -> list[dict[str, Any]]:
-        query_lower = query.lower()
-        scored: list[tuple[int, str, Tool]] = []
+        query = query.strip()
+        if not query or max_results <= 0:
+            return []
+
+        required_name = ""
+        ranking_query = query
+        if query.startswith("+"):
+            parts = query[1:].split(None, 1)
+            if not parts or not parts[0]:
+                return []
+            required_name = self._normalize_search_text(parts[0])
+            ranking_query = parts[1] if len(parts) > 1 else parts[0]
+
+        query_text = self._normalize_search_text(ranking_query)
+        query_compact = query_text.replace(" ", "")
+        query_tokens = set(query_text.split())
+        scored: list[tuple[int, float, str, Tool]] = []
         for registration in self.list_registrations():
             name, tool = registration.name, registration.tool
-            if not tool.should_defer or name in self._disabled:
+            if (
+                not tool.should_defer
+                or name in self._disabled
+                or name in self._discovered
+            ):
                 continue
+
+            name_text = self._normalize_search_text(name)
+            if required_name and required_name not in name_text:
+                continue
+            aliases = [
+                self._normalize_search_text(term)
+                for term in getattr(tool, "search_terms", ())
+                if term
+            ]
+            description = self._normalize_search_text(tool.description or "")
+            searchable = " ".join([name_text, description, *aliases]).strip()
+            searchable_tokens = set(searchable.split())
             score = 0
-            name_lower = name.lower()
-            desc_lower = (tool.description or "").lower()
-            if query_lower in name_lower:
-                score += 10
-            if query_lower in desc_lower:
-                score += 5
-            for word in query_lower.split():
-                if word in name_lower:
-                    score += 3
-                if word in desc_lower:
-                    score += 1
+            if query_text == name_text:
+                score += 200
+            if query_compact and query_compact == name_text.replace(" ", ""):
+                score += 180
+            if query_text and query_text in name_text:
+                score += 100
+            if query_text and query_text in description:
+                score += 60
+            if query_text and query_text in aliases:
+                score += 120
+            score += 18 * len(query_tokens & set(name_text.split()))
+            score += 8 * len(query_tokens & searchable_tokens)
+
+            fuzzy = max(
+                [
+                    SequenceMatcher(
+                        None, query_compact, candidate.replace(" ", "")
+                    ).ratio()
+                    for candidate in [name_text, *aliases]
+                    if candidate and query_compact
+                ],
+                default=0.0,
+            )
+            if fuzzy >= 0.72:
+                score += round(fuzzy * 50)
             if score > 0:
-                scored.append((score, name, tool))
-        scored.sort(key=lambda item: item[0], reverse=True)
+                scored.append((score, fuzzy, name.casefold(), tool))
+        scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
         return [
             self._schema(tool, protocol)
-            for _, _, tool in scored[:max_results]
+            for _, _, _, tool in scored[:min(max_results, 20)]
         ]
+
+    @staticmethod
+    def _normalize_search_text(value: str) -> str:
+        value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+        value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+        return " ".join(value.casefold().split())
 
     def find_deferred_by_names(
         self, names: list[str], protocol: str = "anthropic"

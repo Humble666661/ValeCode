@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from valecode.tools.base import Tool, ToolResult
 
@@ -13,7 +13,7 @@ if __import__("typing").TYPE_CHECKING:
 
 class ToolSearchParams(BaseModel):
     query: str
-    max_results: int = 5
+    max_results: int = Field(default=5, ge=1, le=20)
 
 
 class ToolSearchTool(Tool):
@@ -21,7 +21,8 @@ class ToolSearchTool(Tool):
     description = (
         "Search for and load additional tools that are not immediately available. "
         "Use query 'select:<name>[,<name>...]' to load specific tools by name, "
-        "or provide keywords to search by relevance."
+        "prefix with '+name' to require a tool-name match, or provide keywords "
+        "to search names, descriptions, and aliases by relevance."
     )
     params_model = ToolSearchParams
     category = "read"

@@ -49,6 +49,17 @@ class _DeferredBeta(Tool):
     async def execute(self, params: BaseModel) -> ToolResult:
         return ToolResult(output="deferred beta ok")
 
+class _DeferredAlias(Tool):
+    name = "IssueTrackerLookup"
+    description = "Find work items in the project tracker"
+    search_terms = ("bug ticket", "缺陷 工单")
+    params_model = _DummyParams
+    category = "read"
+    should_defer = True
+
+    async def execute(self, params: BaseModel) -> ToolResult:
+        return ToolResult(output="issue lookup ok")
+
 def _make_registry() -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(_NormalTool())
@@ -159,6 +170,41 @@ async def test_tool_search_keyword():
     assert not result.is_error
     assert "DeferredBeta" in result.output
     assert reg.is_discovered("DeferredBeta")
+
+def test_search_deferred_supports_typo_and_deterministic_ranking():
+    reg = _make_registry()
+
+    schemas = reg.search_deferred("DeferedAlfa", 5)
+
+    assert [schema["name"] for schema in schemas] == ["DeferredAlpha"]
+
+def test_search_deferred_supports_declared_aliases_and_chinese():
+    reg = _make_registry()
+    reg.register(_DeferredAlias())
+
+    english = reg.search_deferred("bug ticket", 5)
+    chinese = reg.search_deferred("缺陷 工单", 5)
+
+    assert english[0]["name"] == "IssueTrackerLookup"
+    assert chinese[0]["name"] == "IssueTrackerLookup"
+
+def test_search_deferred_required_name_and_skips_discovered():
+    reg = _make_registry()
+
+    required = reg.search_deferred("+Deferred beta variant", 5)
+    assert [schema["name"] for schema in required] == ["DeferredBeta"]
+
+    reg.mark_discovered("DeferredBeta")
+    assert reg.search_deferred("beta", 5) == []
+
+def test_search_deferred_empty_and_result_limit_are_bounded():
+    reg = ToolRegistry()
+    for index in range(30):
+        reg.register(_make_deferred_tool(index))
+
+    assert reg.search_deferred("", 5) == []
+    assert reg.search_deferred("heavy", 0) == []
+    assert len(reg.search_deferred("heavy", 1000)) == 20
 
 @pytest.mark.asyncio
 async def test_tool_search_no_match():

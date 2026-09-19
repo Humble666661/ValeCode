@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.resources
 import logging
 import os
 from pathlib import Path
@@ -9,6 +10,8 @@ import yaml
 from valecode.skills.parser import (
     SkillDef,
     SkillParseError,
+    _validate_meta,
+    parse_frontmatter,
     parse_skill_file,
     parse_skill_permissions,
 )
@@ -140,8 +143,46 @@ class SkillLoader:
         )
 
     def _load_builtins(self) -> list[SkillDef]:
-        """内置 skill 已移除，返回空列表。"""
-        return []
+        results: list[SkillDef] = []
+        try:
+            package = importlib.resources.files("valecode.skills.builtins")
+        except (ModuleNotFoundError, TypeError):
+            log.warning("Could not load built-in Skills package")
+            return results
+
+        for item in sorted(package.iterdir(), key=lambda entry: entry.name):
+            if item.is_dir():
+                skill_file = item.joinpath("SKILL.md")
+                if not skill_file.is_file():
+                    continue
+            else:
+                skill_file = item
+            if not skill_file.name.endswith(".md"):
+                continue
+            try:
+                raw = skill_file.read_text(encoding="utf-8")
+                meta, body = parse_frontmatter(raw)
+                _validate_meta(meta, f"builtin:{item.name}")
+                results.append(
+                    SkillDef(
+                        name=meta["name"],
+                        description=meta["description"],
+                        prompt_body=body,
+                        mode=meta.get("mode", "inline"),
+                        model=(
+                            meta["model"].strip() if meta.get("model") else None
+                        ),
+                        context=meta.get("context", "full"),
+                        permission_rules=parse_skill_permissions(
+                            meta, f"builtin:{item.name}"
+                        ),
+                        source_path=None,
+                        is_directory=item.is_dir(),
+                    )
+                )
+            except (OSError, SkillParseError) as exc:
+                log.warning("Skipping built-in Skill %s: %s", item.name, exc)
+        return results
 
 
     def get(self, name: str) -> SkillDef | None:

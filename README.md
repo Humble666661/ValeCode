@@ -185,6 +185,10 @@ frontmatter 的 `model` 字段切换到当前 Provider 上的其他模型或 `ha
 引用的 `scripts/`、`references/` 等资源仍通过标准文件/Shell 工具使用。Skill 声明
 的工具权限仍受项目权限、危险命令检测和沙箱边界约束。
 
+ValeCode 仅内置一个窄范围的 `customize-valecode` Skill，用于修改 ValeCode 自身配置
+和扩展；不会为普通代码任务自动套用通用 commit/review 流程。项目或用户同名 Skill
+可以按现有优先级覆盖它。
+
 ## Python 工具插件
 
 已安装的 Python 包可以通过 `valecode.tools` entry-point 组贡献工具。入口值可以是

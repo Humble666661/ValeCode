@@ -196,10 +196,13 @@ class TestSubstituteArguments:
 # ---------------------------------------------------------------------------
 
 class TestSkillLoader:
-    def test_load_builtins_empty(self) -> None:
-        """内置 skill 已移除，load_all 不再返回内置 skill。"""
+    def test_load_minimal_builtin(self) -> None:
         loader = SkillLoader("/nonexistent")
         skills = loader.load_all()
+        assert "customize-valecode" in skills
+        assert "Do not use it for ordinary application code" in (
+            skills["customize-valecode"].prompt_body
+        )
         assert "commit" not in skills
         assert "review" not in skills
         assert "test" not in skills
@@ -208,31 +211,33 @@ class TestSkillLoader:
     def test_project_overrides_builtin(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / ".valecode" / "skills"
         skills_dir.mkdir(parents=True)
-        custom = skills_dir / "commit.md"
+        custom = skills_dir / "customize-valecode.md"
         custom.write_text(textwrap.dedent("""\
             ---
-            name: commit
-            description: Custom commit
+            name: customize-valecode
+            description: Project-specific ValeCode setup
             mode: inline
             ---
             Custom prompt
         """))
         loader = SkillLoader(str(tmp_path))
         skills = loader.load_all()
-        assert skills["commit"].description == "Custom commit"
-        assert "Custom prompt" in skills["commit"].prompt_body
+        assert (
+            skills["customize-valecode"].description
+            == "Project-specific ValeCode setup"
+        )
+        assert "Custom prompt" in skills["customize-valecode"].prompt_body
 
-    def test_catalog_empty_without_project_skills(self) -> None:
-        """无项目/用户 skill 且内置已移除时，catalog 为空。"""
+    def test_catalog_contains_only_minimal_builtin_without_project_skills(self) -> None:
         loader = SkillLoader("/nonexistent")
         loader.load_all()
         catalog = loader.get_catalog()
-        assert catalog == []
+        assert [name for name, _ in catalog] == ["customize-valecode"]
 
-    def test_get_returns_none_for_removed_builtins(self) -> None:
-        """内置 skill 已移除，get 返回 None。"""
+    def test_removed_generic_builtins_stay_removed(self) -> None:
         loader = SkillLoader("/nonexistent")
         loader.load_all()
+        assert loader.get("customize-valecode") is not None
         assert loader.get("commit") is None
         assert loader.get("review") is None
         assert loader.get("test") is None
@@ -328,11 +333,11 @@ class TestSkillLoader:
         assert "broken" not in skills
 
     def test_reload(self, tmp_path: Path) -> None:
-        """reload 重新扫描目录，内置已移除时结果为空。"""
+        """reload 重新扫描目录并保留最小内置 Skill。"""
         loader = SkillLoader(str(tmp_path))
         loader.load_all()
         skills = loader.reload()
-        assert isinstance(skills, dict)
+        assert "customize-valecode" in skills
 
 
 class TestSkillContent:

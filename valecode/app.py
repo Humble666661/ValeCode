@@ -761,6 +761,7 @@ class ValeCodeApp(App):
         from valecode.agents.durable_task_manager import DurableTaskManager
 
         self.task_manager = DurableTaskManager(self.session_manager.task_store)
+        self.task_manager.start_maintenance()
         self.session_manager.cleanup()
         self.session = self.session_manager.create()
         self.registry.bind_session(self.session.session_id)
@@ -2034,6 +2035,12 @@ class ValeCodeApp(App):
         async def _cleanup() -> None:
             tasks: list[asyncio.Task] = []
 
+            if (
+                self._notification_check_task is not None
+                and not self._notification_check_task.done()
+            ):
+                self._notification_check_task.cancel()
+
             async def _shutdown_hooks() -> None:
                 assert self.hook_engine is not None
                 await self.hook_engine.run_hooks(
@@ -2053,6 +2060,7 @@ class ValeCodeApp(App):
             if self.hook_engine:
                 tasks.append(asyncio.create_task(_shutdown_hooks()))
             tasks.append(asyncio.create_task(self._shutdown_mcp()))
+            tasks.append(asyncio.create_task(self.task_manager.shutdown()))
             async def _release_registry_tools() -> None:
                 await self.registry.release_source(ToolSource.PLUGIN)
                 await self.registry.release_session()

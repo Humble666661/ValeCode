@@ -271,6 +271,37 @@ def test_recovered_queued_task_can_be_cancelled_without_live_handle(tmp_path):
     session.close()
 
 
+@pytest.mark.asyncio
+async def test_periodic_maintenance_recovers_later_expired_lease(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    manager = DurableTaskManager(
+        sessions.task_store,
+        maintenance_interval=0.01,
+    )
+    task = sessions.task_store.create(
+        {"task": "recover later"},
+        session_id=session.session_id,
+        max_attempts=2,
+    )
+    sessions.task_store.claim(task.id, "dead-worker", lease_seconds=-1)
+    sessions.task_store.mark_running(task.id, "dead-worker")
+
+    manager.start_maintenance()
+    manager.start_maintenance()
+    maintenance_task = manager._maintenance_task
+    for _ in range(20):
+        if sessions.task_store.get(task.id).status == TaskStatus.QUEUED:
+            break
+        await asyncio.sleep(0.01)
+
+    assert sessions.task_store.get(task.id).status == TaskStatus.QUEUED
+    assert manager._maintenance_task is maintenance_task
+    await manager.shutdown()
+    assert manager._maintenance_task is None
+    session.close()
+
+
 def test_team_task_board_uses_sqlite_and_dependency_relations(tmp_path):
     sessions = SessionManager(str(tmp_path))
     board = DurableSharedTaskStore(sessions.task_store, "alpha")

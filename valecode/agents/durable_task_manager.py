@@ -33,6 +33,7 @@ class DurableTaskManager(TaskManager):
         per_team_concurrency: int = 4,
         retry_base_seconds: float = 1.0,
         retry_max_seconds: float = 30.0,
+        maintenance_interval: float = 10.0,
     ) -> None:
         super().__init__()
         self.task_store = task_store
@@ -43,10 +44,35 @@ class DurableTaskManager(TaskManager):
         )
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.maintenance_interval = max(0.05, maintenance_interval)
+        self._maintenance_task: asyncio.Task[None] | None = None
         self._global_capacity = asyncio.Semaphore(max(1, max_concurrency))
         self._team_limit = max(1, per_team_concurrency)
         self._team_capacity: dict[str, asyncio.Semaphore] = {}
         self.recovered_tasks = self.task_store.recover_expired_leases()
+
+    def start_maintenance(self) -> None:
+        """Start periodic lease recovery once an event loop is available."""
+        if self._maintenance_task is not None and not self._maintenance_task.done():
+            return
+        self._maintenance_task = asyncio.create_task(self._maintenance_loop())
+
+    async def _maintenance_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.maintenance_interval)
+                try:
+                    recovered = self.task_store.recover_expired_leases()
+                except Exception:
+                    log.exception("Unable to recover expired background task leases")
+                    continue
+                if recovered:
+                    log.info(
+                        "Recovered %d expired background task lease(s)",
+                        len(recovered),
+                    )
+        except asyncio.CancelledError:
+            return
 
     def launch(
         self,
@@ -412,3 +438,10 @@ class DurableTaskManager(TaskManager):
             error="Task was cancelled before adoption",
         )
         return True
+
+    async def shutdown(self) -> None:
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
+            await asyncio.gather(self._maintenance_task, return_exceptions=True)
+            self._maintenance_task = None
+        await super().shutdown()

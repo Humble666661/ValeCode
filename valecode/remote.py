@@ -410,6 +410,7 @@ class RemoteServer:
         # 子 Agent 与持久化后台任务。Remote 暂不开放 Team/Worktree 隔离，
         # 普通定义型子 Agent 及可选的会话 fork 与 CLI/TUI 共用同一实现。
         self.task_manager = DurableTaskManager(self.session_manager.task_store)
+        self.task_manager.start_maintenance()
         self.agent_loader = AgentLoader(
             work_dir,
             enable_verification=self._enable_verification_agent,

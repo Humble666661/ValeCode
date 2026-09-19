@@ -172,6 +172,7 @@ class _PromptResources:
         self.registry = None
         self.session = None
         self.mcp_manager = None
+        self.task_manager = None
         self._closed = False
 
     async def close(self) -> None:
@@ -183,6 +184,11 @@ class _PromptResources:
                 await self.mcp_manager.shutdown()
             except Exception:
                 logging.warning("Failed to shut down prompt MCP manager", exc_info=True)
+        if self.task_manager is not None:
+            try:
+                await self.task_manager.shutdown()
+            except Exception:
+                logging.warning("Failed to stop prompt task manager", exc_info=True)
         if self.registry is not None:
             try:
                 from valecode.tools import ToolSource
@@ -342,6 +348,8 @@ async def _run_prompt(
     )
     trace_manager = TraceManager()
     task_manager = DurableTaskManager(session_manager.task_store)
+    task_manager.start_maintenance()
+    resources.task_manager = task_manager
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
     agent_loader.load_all()
     team_manager = TeamManager(

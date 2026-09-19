@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -8,6 +10,7 @@ from valecode.permissions.dangerous import DangerousCommandDetector, is_safe_com
 from valecode.permissions.modes import DecisionEffect, PermissionMode, mode_decide
 from valecode.permissions.rules import RuleEngine, extract_content, parse_rule
 from valecode.permissions.sandbox import PathSandbox
+from valecode.permissions.session_store import SessionAllowStore
 from valecode.tools.base import Tool
 from valecode.tools.todo_write import TodoWrite
 
@@ -38,31 +41,53 @@ class PermissionChecker:
         self.plan_file_path: str = ""
         # OS 级沙箱是否启用（开启后命令类工具可自动放行，因为内核会兜底）
         self.sandbox_enabled = sandbox_enabled
-        # Layer 4b: 会话级 allow-always 集合（内存中，不持久化）
-        # 存放格式为 "ToolName:pattern"，用户选择 "don't ask again" 时记录
+        # Layer 4b: exact grants bound to the current conversation session.
         self._session_allowed: set[str] = set()
+        self._session_allow_store: SessionAllowStore | None = None
 
 
-    def add_session_allow(self, tool_name: str, content: str) -> None:
-        """将工具+内容模式加入会话级放行集合（Layer 4b）。
+    def bind_session(self, session_id: str) -> None:
+        """Switch grants to one session; a new session never inherits them."""
+        store = SessionAllowStore(self.sandbox.project_root, session_id)
+        try:
+            grants = store.load()
+        except (OSError, ValueError):
+            grants = set()  # Corrupt state must never grant permission.
+        self._session_allow_store = store
+        self._session_allowed = grants
 
-        比持久化规则引擎优先级更高，但不写入磁盘——会话结束即消失。
-        """
-        key = f"{tool_name}:{content}"
-        self._session_allowed.add(key)
+    @staticmethod
+    def _session_fingerprint(tool_name: str, arguments: dict[str, Any]) -> str:
+        content = extract_content(tool_name, arguments)
+        # Known tools use a stable action field (e.g. Bash command or file
+        # path). Unknown tools use their full argument object, never a broad
+        # empty-string grant for every invocation of that tool.
+        action: Any = content if content else arguments
+        payload = json.dumps(
+            [tool_name, action], ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), default=str,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _check_session_allowed(self, tool_name: str, content: str) -> bool:
-        """检查是否匹配会话级放行记录。"""
-        if not self._session_allowed:
-            return False
-        key = f"{tool_name}:{content}"
-        if key in self._session_allowed:
-            return True
-        # 前缀匹配：已记录的 pattern 可能带通配尾缀
-        for allowed in self._session_allowed:
-            if allowed.endswith("*") and key.startswith(allowed[:-1]):
-                return True
-        return False
+    def add_session_allow(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        """Remember one exact action for this session, including after resume."""
+        fingerprint = self._session_fingerprint(tool_name, arguments)
+        if self._session_allow_store is not None:
+            try:
+                # Cloned checkers may have learned grants since this instance
+                # was created; do not overwrite them with a stale snapshot.
+                self._session_allowed.update(self._session_allow_store.load())
+            except (OSError, ValueError):
+                pass
+        self._session_allowed.add(fingerprint)
+        if self._session_allow_store is not None:
+            try:
+                self._session_allow_store.save(self._session_allowed)
+            except (OSError, ValueError):
+                pass  # In-process grant remains valid; no broader rule is made.
+
+    def _check_session_allowed(self, tool_name: str, arguments: dict[str, Any]) -> bool:
+        return self._session_fingerprint(tool_name, arguments) in self._session_allowed
 
     def bind_skill_scope(
         self, skill_name: str, permission_rules: dict[str, list[str]]
@@ -87,6 +112,7 @@ class PermissionChecker:
         )
         cloned.plan_file_path = self.plan_file_path
         cloned._session_allowed = set(self._session_allowed)
+        cloned._session_allow_store = self._session_allow_store
         return cloned
 
     @staticmethod
@@ -119,6 +145,11 @@ class PermissionChecker:
 
         # Layer 1: 安全的只读命令（自动放行）
         if tool.category == "command" and is_safe_command(content or ""):
+            safe_rule = self.rule_engine.evaluate(permission_name, content)
+            if safe_rule == "deny":
+                return Decision(effect="deny", reason="权限规则拒绝")
+            if safe_rule == "ask":
+                return Decision(effect="ask", reason="权限规则要求确认")
             return Decision(effect="allow", reason="Safe read-only command")
 
         # Layer 1b: 危险命令黑名单（仅 Bash）
@@ -167,6 +198,8 @@ class PermissionChecker:
             return Decision(effect="allow", reason="权限规则放行")
         if rule_result == "deny":
             return Decision(effect="deny", reason="权限规则拒绝")
+        if rule_result == "ask":
+            return Decision(effect="ask", reason="权限规则要求确认")
 
         # Layer 3b: active Skill scopes. Persistent user/project rules above
         # retain authority; dangerous-command and path checks can never be
@@ -184,9 +217,9 @@ class PermissionChecker:
         if isinstance(tool, TodoWrite):
             return Decision(effect="allow", reason="内置会话任务进度更新")
 
-        # Layer 4b: 会话级放行（内存中，优先于模式兜底）
-        if self._check_session_allowed(permission_name, content or ""):
-            return Decision(effect="allow", reason="会话级放行（session allow-always）")
+        # Layer 4b: session-only exact grant, after explicit persistent rules.
+        if self._check_session_allowed(permission_name, arguments):
+            return Decision(effect="allow", reason="当前会话已允许此操作")
 
         # Layer 4: 权限模式兜底判定
         effect = mode_decide(self.mode, tool.category)

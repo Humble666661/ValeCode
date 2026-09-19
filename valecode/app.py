@@ -762,6 +762,7 @@ class ValeCodeApp(App):
         self.session_manager.cleanup()
         self.session = self.session_manager.create()
         self.registry.bind_session(self.session.session_id)
+        checker.bind_session(self.session.session_id)
 
         from valecode.filehistory import FileHistory
         self.file_history = FileHistory(work_dir, self.session.session_id)
@@ -1078,6 +1079,8 @@ class ValeCodeApp(App):
         self.session = session
         if self.agent:
             self.agent.session_id = session.session_id
+            if self.agent.permission_checker:
+                self.agent.permission_checker.bind_session(session.session_id)
 
     def _persist_compact_boundary(self, notification: CompactNotification) -> None:
         """Layer-2 compact 后写入 compact_boundary 记录。

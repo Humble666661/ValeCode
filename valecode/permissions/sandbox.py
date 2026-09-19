@@ -13,6 +13,7 @@ class PathSandbox:
     _DEFAULT_DENY_WRITE: list[str] = [
         ".valecode/config.yaml",
         ".valecode/permissions.local.yaml",
+        ".valecode/session-permissions/",
         ".valecode/skills/",
     ]
 

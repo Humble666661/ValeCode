@@ -821,6 +821,13 @@ class SessionManager:
             deleted = True
         if self.session_store.delete(session_id):
             deleted = True
+        if deleted:
+            from valecode.permissions.session_store import SessionAllowStore
+
+            try:
+                SessionAllowStore(self._sessions_dir.parent.parent, session_id).delete()
+            except (OSError, ValueError):
+                pass  # Session deletion must still finish if a sidecar is corrupt.
         return deleted
 
     def cleanup(self, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> int:

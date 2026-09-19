@@ -83,6 +83,7 @@ def attach_sandbox(
         deny_write=[
             str(Path(work_dir) / ".valecode" / "config.yaml"),
             str(Path(work_dir) / ".valecode" / "permissions.local.yaml"),
+            str(Path(work_dir) / ".valecode" / "session-permissions"),
         ],
         network_enabled=network_enabled,
     )

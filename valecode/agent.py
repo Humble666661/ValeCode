@@ -166,7 +166,8 @@ class HookEvent(RuntimeEvent):
 class PermissionResponse(Enum):
     ALLOW = "allow"
     DENY = "deny"
-    ALLOW_ALWAYS = "allow_always"
+    ALLOW_SESSION = "allow_session"
+    ALLOW_ALWAYS = "allow_always"  # Legacy response; now session-scoped too.
 
 
 @dataclass
@@ -2020,16 +2021,9 @@ class Agent:
                     yield result, elapsed, is_unknown
                     return
 
-                if response == PermissionResponse.ALLOW_ALWAYS:
-                    from valecode.permissions.rules import Rule, extract_content
+                if response in (PermissionResponse.ALLOW_SESSION, PermissionResponse.ALLOW_ALWAYS):
                     permission_name = tool.permission_name
-                    content = extract_content(permission_name, tc.arguments)
-                    pattern = f"{content[:60]}*" if len(content) > 60 else f"{content}*"
-                    # 持久化规则写入本地文件
-                    rule = Rule(tool_name=permission_name, pattern=pattern, effect="allow")
-                    self.permission_checker.rule_engine.append_local_rule(rule)
-                    # 同时加入会话级放行集合，本轮立即生效无需磁盘读取
-                    self.permission_checker.add_session_allow(permission_name, content)
+                    self.permission_checker.add_session_allow(permission_name, tc.arguments)
 
         try:
             params = tool.params_model.model_validate(tc.arguments)

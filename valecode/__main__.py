@@ -226,6 +226,7 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     instructions = load_instructions(work_dir)
     session_manager = SessionManager(work_dir)
     session = session_manager.create()
+    checker.bind_session(session.session_id)
     registry = create_default_registry()
     registry.bind_session(session.session_id)
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))

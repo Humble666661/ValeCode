@@ -620,7 +620,7 @@ function addPermissionDialog(data) {
     '<div class="desc">' + escapeHtml(data.description) + '</div>' +
     '<div class="actions">' +
       '<button class="btn-allow" onclick="respondPerm(\'' + data.id + '\', \'allow\')">Allow</button>' +
-      '<button class="btn-always" onclick="respondPerm(\'' + data.id + '\', \'allowAlways\')">Allow Always</button>' +
+      '<button class="btn-always" onclick="respondPerm(\'' + data.id + '\', \'allowSession\')">Allow for this session</button>' +
       '<button class="btn-deny" onclick="respondPerm(\'' + data.id + '\', \'deny\')">Deny</button>' +
     '</div>';
   messagesEl.appendChild(div);

@@ -11,7 +11,7 @@ from valecode.agent import PermissionResponse
 
 _PERM_OPTIONS = [
     ("Yes", PermissionResponse.ALLOW),
-    ("Yes, and don't ask again for this pattern", PermissionResponse.ALLOW_ALWAYS),
+    ("Yes, don't ask again in this session", PermissionResponse.ALLOW_SESSION),
     ("No", PermissionResponse.DENY),
 ]
 

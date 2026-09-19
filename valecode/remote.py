@@ -322,6 +322,7 @@ class RemoteServer:
         self.session_manager = SessionManager(work_dir)
         self.session = self.session_manager.create()
         self.session_id = self.session.session_id
+        checker.bind_session(self.session_id)
 
         # 创建 LLM 客户端
         client = create_client(provider)
@@ -769,7 +770,8 @@ class RemoteServer:
         mapping = {
             "allow": PermissionResponse.ALLOW,
             "deny": PermissionResponse.DENY,
-            "allowAlways": PermissionResponse.ALLOW_ALWAYS,
+            "allowSession": PermissionResponse.ALLOW_SESSION,
+            "allowAlways": PermissionResponse.ALLOW_SESSION,  # older clients
         }
         response = mapping.get(response_str, PermissionResponse.DENY)
         future.set_result(response)

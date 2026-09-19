@@ -388,15 +388,27 @@ class DurableTaskManager(TaskManager):
     def get_persisted(self, task_id: str) -> TaskState | None:
         return self.task_store.get(task_id)
 
-    def list_persisted(self) -> list[TaskState]:
-        return self.task_store.list()
+    def list_persisted(self, *, session_id: str | None = None) -> list[TaskState]:
+        return self.task_store.list(session_id=session_id)
 
     def cancel(self, task_id: str) -> bool:
         bg = self._tasks.get(task_id)
-        if bg is None or bg.status not in {"queued", "blocked", "running", "retrying"}:
+        if bg is not None and bg.status in {
+            "queued", "blocked", "running", "retrying",
+        }:
+            handle = self._async_tasks.get(task_id)
+            if handle is not None and not handle.done():
+                handle.cancel()
+                return True
+
+        # A recovered queued task may have no process-local handle. It must
+        # still be cancellable from the durable task view.
+        state = self.task_store.get(task_id)
+        if state is None or state.status != TaskStatus.QUEUED:
             return False
-        handle = self._async_tasks.get(task_id)
-        if handle is None or handle.done():
-            return False
-        handle.cancel()
+        self.task_store.transition(
+            task_id,
+            TaskStatus.CANCELLED,
+            error="Task was cancelled before adoption",
+        )
         return True

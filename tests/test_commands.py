@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -468,6 +469,92 @@ class TestMemoryHandler:
         ctx.memory_manager = None
         await handle_memory(ctx)
         assert "未初始化" in ui.messages[0]
+
+
+class TestTasksHandler:
+    @pytest.mark.asyncio
+    async def test_lists_persisted_tasks_for_current_session(self) -> None:
+        from valecode.commands.handlers.tasks import create_tasks_handler
+        from valecode.persistence import TaskStatus
+
+        manager = MagicMock()
+        manager.list_tasks.return_value = []
+        manager.list_persisted.return_value = [
+            SimpleNamespace(
+                id="task-1",
+                session_id="session-a",
+                input={"name": "restored"},
+                status=TaskStatus.SUCCEEDED,
+                result={"output": "done"},
+                result_path=None,
+                error=None,
+                attempt_count=1,
+                max_attempts=3,
+                input_tokens=10,
+                output_tokens=5,
+                created_at="2026-09-20T00:00:00+00:00",
+                completed_at="2026-09-20T00:00:02+00:00",
+            )
+        ]
+        ui = MockUI()
+        ctx = _make_context(ui=ui)
+        ctx.session = SimpleNamespace(session_id="session-a")
+
+        await create_tasks_handler(manager)(ctx)
+
+        manager.list_persisted.assert_called_once_with(session_id="session-a")
+        assert "task-1" in ui.messages[0]
+        assert "restored" in ui.messages[0]
+        assert "succeeded" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_info_reads_persisted_result_after_restart(self) -> None:
+        from valecode.commands.handlers.tasks import create_tasks_handler
+        from valecode.persistence import TaskStatus
+
+        state = SimpleNamespace(
+            id="task-1",
+            session_id="session-a",
+            input={"name": "restored"},
+            status=TaskStatus.SUCCEEDED,
+            result={"output": "persisted result"},
+            result_path="C:/tmp/task-1.txt",
+            error=None,
+            attempt_count=2,
+            max_attempts=3,
+            input_tokens=10,
+            output_tokens=5,
+            created_at="2026-09-20T00:00:00+00:00",
+            completed_at="2026-09-20T00:00:02+00:00",
+        )
+        manager = MagicMock()
+        manager.get.return_value = None
+        manager.get_persisted.return_value = state
+        ui = MockUI()
+        ctx = _make_context(args="info task-1", ui=ui)
+        ctx.session = SimpleNamespace(session_id="session-a")
+
+        await create_tasks_handler(manager)(ctx)
+
+        assert "persisted result" in ui.messages[0]
+        assert "2/3" in ui.messages[0]
+        assert "C:/tmp/task-1.txt" in ui.messages[0]
+
+    @pytest.mark.asyncio
+    async def test_cancel_rejects_persisted_task_from_another_session(self) -> None:
+        from valecode.commands.handlers.tasks import create_tasks_handler
+
+        manager = MagicMock()
+        manager.get.return_value = None
+        manager.get_persisted.return_value = SimpleNamespace(session_id="session-b")
+        ui = MockUI()
+        ctx = _make_context(args="cancel task-1", ui=ui)
+        ctx.session = SimpleNamespace(session_id="session-a")
+
+        await create_tasks_handler(manager)(ctx)
+
+        manager.cancel.assert_not_called()
+        assert "不属于当前会话" in ui.messages[0]
 
 # ---------------------------------------------------------------------------
 # 集成测试：register_all_commands

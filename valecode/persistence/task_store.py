@@ -141,6 +141,7 @@ class TaskStore:
         *,
         statuses: set[TaskStatus] | None = None,
         run_id: str | None = None,
+        session_id: str | None = None,
         team_name: str | None = None,
         limit: int = 500,
     ) -> list[TaskState]:
@@ -153,6 +154,9 @@ class TaskStore:
         if run_id is not None:
             clauses.append("run_id = ?")
             params.append(run_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if team_name is not None:
             clauses.append("team_name = ?")
             params.append(team_name)

@@ -54,6 +54,24 @@ def test_task_store_claim_enforces_dependencies_and_leases(tmp_path):
     session.close()
 
 
+def test_task_store_list_can_filter_by_session(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    first_session = sessions.create()
+    second_session = sessions.create()
+    first = sessions.task_store.create(
+        {"task": "first"}, session_id=first_session.session_id
+    )
+    sessions.task_store.create(
+        {"task": "second"}, session_id=second_session.session_id
+    )
+
+    listed = sessions.task_store.list(session_id=first_session.session_id)
+
+    assert [task.id for task in listed] == [first.id]
+    first_session.close()
+    second_session.close()
+
+
 def test_expired_lease_is_requeued_then_exhausted(tmp_path):
     sessions = SessionManager(str(tmp_path))
     session = sessions.create()
@@ -234,6 +252,22 @@ async def test_expired_task_can_be_adopted_by_another_worker(tmp_path):
     assert state.status == TaskStatus.SUCCEEDED
     assert state.attempt_count == 2
     assert new_agent.run_to_completion.await_args.args[0] == "continue me"
+    session.close()
+
+
+def test_recovered_queued_task_can_be_cancelled_without_live_handle(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    task = sessions.task_store.create(
+        {"task": "continue me", "name": "recovered"},
+        session_id=session.session_id,
+    )
+    manager = DurableTaskManager(sessions.task_store)
+
+    assert manager.cancel(task.id) is True
+    state = sessions.task_store.get(task.id)
+    assert state.status == TaskStatus.CANCELLED
+    assert state.error == "Task was cancelled before adoption"
     session.close()
 
 

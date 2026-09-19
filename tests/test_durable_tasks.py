@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +23,29 @@ def make_agent(session_id: str, result: str = "done"):
     agent.total_output_tokens = 7
     agent.run_to_completion = AsyncMock(return_value=result)
     return agent
+
+
+def test_durable_manager_uses_shared_background_task_config(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    config = SimpleNamespace(
+        lease_seconds=42.0,
+        heartbeat_interval=9.0,
+        maintenance_interval=4.0,
+        max_concurrency=6,
+        per_team_concurrency=2,
+        retry_base_seconds=2.0,
+        retry_max_seconds=12.0,
+    )
+
+    manager = DurableTaskManager.from_config(sessions.task_store, config)
+
+    assert manager.lease_seconds == 42.0
+    assert manager.heartbeat_interval == 9.0
+    assert manager.maintenance_interval == 4.0
+    assert manager._global_capacity._value == 6
+    assert manager._team_limit == 2
+    assert manager.retry_base_seconds == 2.0
+    assert manager.retry_max_seconds == 12.0
 
 
 def test_task_store_claim_enforces_dependencies_and_leases(tmp_path):

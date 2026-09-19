@@ -260,13 +260,65 @@ def validate_remote(raw_remote: dict | None) -> dict:
     return {"host": host.strip(), "port": port, "token": token.strip()}
 
 
+def validate_background_tasks(raw_tasks: dict | None) -> dict:
+    """Validate durable background worker tuning."""
+    defaults = {
+        "lease_seconds": 30.0,
+        "heartbeat_interval": 10.0,
+        "maintenance_interval": 10.0,
+        "max_concurrency": 8,
+        "per_team_concurrency": 4,
+        "retry_base_seconds": 1.0,
+        "retry_max_seconds": 30.0,
+    }
+    if raw_tasks is None:
+        return defaults
+    if not isinstance(raw_tasks, dict):
+        raise ConfigError("'background_tasks' must be a mapping")
+
+    result = dict(defaults)
+    duration_fields = (
+        "lease_seconds",
+        "heartbeat_interval",
+        "maintenance_interval",
+        "retry_base_seconds",
+        "retry_max_seconds",
+    )
+    for key in duration_fields:
+        if key not in raw_tasks:
+            continue
+        value = raw_tasks[key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise ConfigError(f"'background_tasks.{key}' must be a positive number")
+        result[key] = float(value)
+
+    for key in ("max_concurrency", "per_team_concurrency"):
+        if key not in raw_tasks:
+            continue
+        value = raw_tasks[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ConfigError(f"'background_tasks.{key}' must be a positive integer")
+        result[key] = value
+
+    if result["retry_max_seconds"] < result["retry_base_seconds"]:
+        raise ConfigError(
+            "'background_tasks.retry_max_seconds' must be greater than or "
+            "equal to retry_base_seconds"
+        )
+    return result
+
+
 def validate_config_structure(raw: object) -> dict:
     """校验的主入口。校验解析后的原始配置，返回清洗后的字典。
 
     返回的字典包含以下键：
         providers、permission_mode、mcp_servers、hooks、
         enable_fork、enable_verification_agent、worktree、
-        teammate_mode、enable_coordinator_mode、sandbox、remote
+        teammate_mode、enable_coordinator_mode、sandbox、remote、background_tasks
     """
     if not isinstance(raw, dict) or "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
@@ -287,4 +339,5 @@ def validate_config_structure(raw: object) -> dict:
         ),
         "sandbox": validate_sandbox(raw.get("sandbox")),
         "remote": validate_remote(raw.get("remote")),
+        "background_tasks": validate_background_tasks(raw.get("background_tasks")),
     }

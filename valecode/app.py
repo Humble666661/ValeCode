@@ -600,6 +600,7 @@ class ValeCodeApp(App):
         enable_coordinator_mode: bool = False,
         driver_class: type | None = None,
         sandbox_config: Any = None,
+        background_task_config: Any = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
@@ -613,6 +614,7 @@ class ValeCodeApp(App):
         self._enable_coordinator_mode = enable_coordinator_mode
         from valecode.config import SandboxAppConfig
         self._sandbox_cfg: SandboxAppConfig = sandbox_config or SandboxAppConfig()
+        self._background_task_config = background_task_config
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
@@ -760,7 +762,10 @@ class ValeCodeApp(App):
         self.session_manager = SessionManager(work_dir)
         from valecode.agents.durable_task_manager import DurableTaskManager
 
-        self.task_manager = DurableTaskManager(self.session_manager.task_store)
+        self.task_manager = DurableTaskManager.from_config(
+            self.session_manager.task_store,
+            self._background_task_config,
+        )
         self.task_manager.start_maintenance()
         self.session_manager.cleanup()
         self.session = self.session_manager.create()

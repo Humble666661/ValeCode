@@ -51,6 +51,31 @@ class DurableTaskManager(TaskManager):
         self._team_capacity: dict[str, asyncio.Semaphore] = {}
         self.recovered_tasks = self.task_store.recover_expired_leases()
 
+    @classmethod
+    def from_config(
+        cls,
+        task_store: TaskStore,
+        config: Any = None,
+        **overrides: Any,
+    ) -> DurableTaskManager:
+        """Construct a worker from AppConfig.background_tasks-like values."""
+        names = (
+            "lease_seconds",
+            "heartbeat_interval",
+            "maintenance_interval",
+            "max_concurrency",
+            "per_team_concurrency",
+            "retry_base_seconds",
+            "retry_max_seconds",
+        )
+        values = {
+            name: getattr(config, name)
+            for name in names
+            if config is not None and hasattr(config, name)
+        }
+        values.update(overrides)
+        return cls(task_store, **values)
+
     def start_maintenance(self) -> None:
         """Start periodic lease recovery once an event loop is available."""
         if self._maintenance_task is not None and not self._maintenance_task.done():

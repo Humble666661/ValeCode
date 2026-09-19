@@ -124,6 +124,7 @@ def main() -> None:
                 auth_token=config.remote.token,
                 enable_fork=config.enable_fork,
                 enable_verification_agent=config.enable_verification_agent,
+                background_task_config=config.background_tasks,
             )
         except ValueError as e:
             print(f"Remote config error: {e}", file=sys.stderr)
@@ -146,6 +147,7 @@ def main() -> None:
         enable_coordinator_mode=config.enable_coordinator_mode,
         driver_class=NoAltScreenDriver,
         sandbox_config=config.sandbox,
+        background_task_config=config.background_tasks,
     )
     app.run()
 
@@ -347,7 +349,10 @@ async def _run_prompt(
         symlink_directories=wt_cfg.symlink_directories,
     )
     trace_manager = TraceManager()
-    task_manager = DurableTaskManager(session_manager.task_store)
+    task_manager = DurableTaskManager.from_config(
+        session_manager.task_store,
+        getattr(config, "background_tasks", None),
+    )
     task_manager.start_maintenance()
     resources.task_manager = task_manager
     agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)

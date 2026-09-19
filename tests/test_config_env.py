@@ -170,6 +170,82 @@ def test_remote_port_from_dotenv_must_be_valid(
         load_config()
 
 
+def test_background_task_configuration_loads_and_validates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    project = _isolate_paths(monkeypatch, tmp_path)
+    config_path = project / "config.yaml"
+    config_path.write_text(
+        "providers:\n"
+        "  - name: test\n"
+        "    protocol: anthropic\n"
+        "    base_url: https://api.example.test\n"
+        "    model: test-model\n"
+        "background_tasks:\n"
+        "  lease_seconds: 45\n"
+        "  heartbeat_interval: 8.5\n"
+        "  maintenance_interval: 3\n"
+        "  max_concurrency: 6\n"
+        "  per_team_concurrency: 2\n"
+        "  retry_base_seconds: 2\n"
+        "  retry_max_seconds: 12\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.background_tasks.lease_seconds == 45.0
+    assert config.background_tasks.heartbeat_interval == 8.5
+    assert config.background_tasks.maintenance_interval == 3.0
+    assert config.background_tasks.max_concurrency == 6
+    assert config.background_tasks.per_team_concurrency == 2
+    assert config.background_tasks.retry_base_seconds == 2.0
+    assert config.background_tasks.retry_max_seconds == 12.0
+
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "retry_max_seconds: 12", "retry_max_seconds: 1"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="greater than or equal"):
+        load_config(config_path)
+
+
+def test_background_task_layers_merge_individual_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    project = _isolate_paths(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / ".valecode").mkdir()
+    (project / ".valecode").mkdir()
+    provider = (
+        "providers:\n"
+        "  - name: test\n"
+        "    protocol: anthropic\n"
+        "    base_url: https://api.example.test\n"
+        "    model: test-model\n"
+    )
+    (home / ".valecode" / "config.yaml").write_text(
+        provider
+        + "background_tasks:\n"
+        + "  lease_seconds: 60\n"
+        + "  max_concurrency: 5\n",
+        encoding="utf-8",
+    )
+    (project / ".valecode" / "config.local.yaml").write_text(
+        provider
+        + "background_tasks:\n"
+        + "  max_concurrency: 2\n",
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.background_tasks.lease_seconds == 60.0
+    assert config.background_tasks.max_concurrency == 2
+
+
 def test_later_yaml_layer_can_explicitly_disable_boolean_options(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

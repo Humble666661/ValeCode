@@ -260,6 +260,25 @@ ValeCode 会实际探测沙箱 namespace 是否可用。探测失败时不会静
 `auto_allow` 仅在 OS 沙箱成功附加后对 Bash 生效。Windows 环境需要默认 WSL2
 发行版，并在该发行版中安装 `bubblewrap`。
 
+## 后台任务配置
+
+后台子 Agent 使用 SQLite lease 支持重试和故障回收。可在 `.valecode/config.yaml`
+中调整 worker 参数；未配置时使用以下默认值：
+
+```yaml
+background_tasks:
+  lease_seconds: 30
+  heartbeat_interval: 10
+  maintenance_interval: 10
+  max_concurrency: 8
+  per_team_concurrency: 4
+  retry_base_seconds: 1
+  retry_max_seconds: 30
+```
+
+`heartbeat_interval` 在运行时不会超过 lease 时长的一半；重试最大间隔不能小于
+基础间隔。TUI、`-p` 和 Remote 使用同一组配置。
+
 ## 开发与测试
 
 ```bash
@@ -267,7 +286,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **676 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **798 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

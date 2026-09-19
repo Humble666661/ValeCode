@@ -100,6 +100,7 @@ class RemoteServer:
         auth_token: str = "",
         enable_fork: bool = False,
         enable_verification_agent: bool = False,
+        background_task_config: Any = None,
     ) -> None:
         if not _is_loopback_bind(addr) and not auth_token:
             raise ValueError(
@@ -114,6 +115,7 @@ class RemoteServer:
         self._sandbox_config = sandbox_config or SandboxAppConfig()
         self._enable_fork = enable_fork
         self._enable_verification_agent = enable_verification_agent
+        self._background_task_config = background_task_config
 
         # WebSocket 连接池（支持多客户端广播）
         self._connections: set[ServerConnection] = set()
@@ -409,7 +411,10 @@ class RemoteServer:
 
         # 子 Agent 与持久化后台任务。Remote 暂不开放 Team/Worktree 隔离，
         # 普通定义型子 Agent 及可选的会话 fork 与 CLI/TUI 共用同一实现。
-        self.task_manager = DurableTaskManager(self.session_manager.task_store)
+        self.task_manager = DurableTaskManager.from_config(
+            self.session_manager.task_store,
+            self._background_task_config,
+        )
         self.task_manager.start_maintenance()
         self.agent_loader = AgentLoader(
             work_dir,

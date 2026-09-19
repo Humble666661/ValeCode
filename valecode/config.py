@@ -193,6 +193,22 @@ class RemoteAppConfig:
 
 
 @dataclass
+class BackgroundTaskConfig:
+    """Durable background worker timing and concurrency limits."""
+
+    lease_seconds: float = 30.0
+    heartbeat_interval: float = 10.0
+    maintenance_interval: float = 10.0
+    max_concurrency: int = 8
+    per_team_concurrency: int = 4
+    retry_base_seconds: float = 1.0
+    retry_max_seconds: float = 30.0
+    _specified_fields: frozenset[str] = field(
+        default_factory=frozenset, repr=False, compare=False
+    )
+
+
+@dataclass
 class AppConfig:
     providers: list[ProviderConfig]
     permission_mode: str = "default"
@@ -205,6 +221,9 @@ class AppConfig:
     enable_coordinator_mode: bool = False
     sandbox: SandboxAppConfig = field(default_factory=SandboxAppConfig)
     remote: RemoteAppConfig = field(default_factory=RemoteAppConfig)
+    background_tasks: BackgroundTaskConfig = field(
+        default_factory=BackgroundTaskConfig
+    )
     _specified_fields: frozenset[str] = field(
         default_factory=frozenset, repr=False, compare=False
     )
@@ -260,6 +279,16 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
         port=remote_data["port"],
         token=remote_data["token"],
     )
+    task_data = validated["background_tasks"]
+    background_task_cfg = BackgroundTaskConfig(
+        lease_seconds=task_data["lease_seconds"],
+        heartbeat_interval=task_data["heartbeat_interval"],
+        maintenance_interval=task_data["maintenance_interval"],
+        max_concurrency=task_data["max_concurrency"],
+        per_team_concurrency=task_data["per_team_concurrency"],
+        retry_base_seconds=task_data["retry_base_seconds"],
+        retry_max_seconds=task_data["retry_max_seconds"],
+    )
 
     return AppConfig(
         providers=providers,
@@ -273,6 +302,7 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
         enable_coordinator_mode=validated["enable_coordinator_mode"],
         sandbox=sandbox_cfg,
         remote=remote_cfg,
+        background_tasks=background_task_cfg,
     )
 
 
@@ -294,6 +324,13 @@ def _load_single_file(path: Path, env: Mapping[str, str] | None = None) -> AppCo
     raw_remote = raw.get("remote")
     if isinstance(raw_remote, dict):
         config.remote._specified_fields = frozenset(raw_remote)
+    raw_background_tasks = raw.get("background_tasks")
+    if isinstance(raw_background_tasks, dict):
+        config.background_tasks._specified_fields = frozenset(
+            name
+            for name in raw_background_tasks
+            if hasattr(config.background_tasks, name)
+        )
     return config
 
 
@@ -338,6 +375,14 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
         base.remote.port = override.remote.port
     if "token" in remote_fields:
         base.remote.token = override.remote.token
+
+    task_fields = override.background_tasks._specified_fields
+    for field_name in task_fields:
+        setattr(
+            base.background_tasks,
+            field_name,
+            getattr(override.background_tasks, field_name),
+        )
     return base
 
 

@@ -151,14 +151,52 @@ def main() -> None:
 async def _run_prompt_with_cleanup(
     config, permission_mode, hook_engine, prompt: str, output_format: str,
 ) -> None:
+    resources = _PromptResources()
     try:
-        await _run_prompt(config, permission_mode, hook_engine, prompt, output_format)
+        await _run_prompt(
+            config, permission_mode, hook_engine, prompt, output_format,
+            _resources=resources,
+        )
     finally:
+        await resources.close()
         if hook_engine is not None:
             await hook_engine.shutdown()
 
 
-async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_format: str = "text") -> None:
+class _PromptResources:
+    """Resources owned by one non-interactive prompt invocation."""
+
+    def __init__(self) -> None:
+        self.registry = None
+        self.session = None
+        self.mcp_manager = None
+        self._closed = False
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.mcp_manager is not None:
+            try:
+                await self.mcp_manager.shutdown()
+            except Exception:
+                logging.warning("Failed to shut down prompt MCP manager", exc_info=True)
+        if self.registry is not None:
+            try:
+                await self.registry.release_session()
+            except Exception:
+                logging.warning("Failed to release prompt tool session", exc_info=True)
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                logging.warning("Failed to close prompt session", exc_info=True)
+
+
+async def _run_prompt(
+    config, permission_mode, hook_engine, prompt: str,
+    output_format: str = "text", *, _resources: _PromptResources | None = None,
+) -> None:
     from valecode.agent import (
         Agent,
         CompactNotification,
@@ -199,6 +237,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     from valecode.config import WorktreeConfig
 
     is_json = output_format == "stream-json"
+    owns_resources = _resources is None
+    resources = _resources or _PromptResources()
 
     def emit_json(obj: dict) -> None:
         """输出一行 NDJSON 到 stdout"""
@@ -226,10 +266,37 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     instructions = load_instructions(work_dir)
     session_manager = SessionManager(work_dir)
     session = session_manager.create()
+    resources.session = session
     checker.bind_session(session.session_id)
     registry = create_default_registry()
+    resources.registry = registry
     registry.bind_session(session.session_id)
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))
+
+    mcp_instructions = ""
+    mcp_configs = getattr(config, "mcp_servers", [])
+    if mcp_configs:
+        from valecode.mcp import MCPManager
+
+        manager = MCPManager()
+        resources.mcp_manager = manager
+        manager.load_configs(mcp_configs)
+        connect_result = await manager.register_all_tools(registry)
+        for error in connect_result.errors:
+            logging.warning("MCP error: %s", error)
+        sections: list[str] = []
+        for server in connect_result.servers:
+            body = server.instructions
+            if not body:
+                names = manager.tool_names_for_server(server.name)
+                body = "Available tools: " + ", ".join(names) if names else ""
+            sections.append(f"## {server.name}\n{body}".rstrip())
+        if sections:
+            mcp_instructions = (
+                "# MCP Server Instructions\n\n"
+                "The following MCP servers have provided instructions for how "
+                "to use their tools and resources:\n\n" + "\n\n".join(sections)
+            )
     if config.sandbox.enabled:
         from valecode.sandbox import attach_sandbox
 
@@ -318,6 +385,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
     conv = ConversationManager()
     conv.add_user_message(prompt)
     session.append(conv.history[-1])
+    if mcp_instructions:
+        conv.add_system_reminder(mcp_instructions)
 
     start = time.monotonic()
     text_buf = ""
@@ -419,7 +488,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
 
     # 如果有 team 在运行，轮询等待 teammate 完成
     if not team_manager._teams:
-        await registry.release_session()
+        if owns_resources:
+            await resources.close()
         return
 
     for i in range(90):
@@ -445,7 +515,8 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         else:
             print(last_result, flush=True)
 
-    await registry.release_session()
+    if owns_resources:
+        await resources.close()
 
 
 if __name__ == "__main__":

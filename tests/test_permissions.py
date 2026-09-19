@@ -770,3 +770,86 @@ class TestSandboxAutoAllowRespectsDenyAsk:
         tool = Bash()
         d = checker.check(tool, {"command": "git push origin main"})
         assert d.effect == "ask"
+
+
+class TestBashPathBoundary:
+    def _checker(
+        self, root: Path, *, mode: PermissionMode = PermissionMode.DEFAULT,
+        rules_path: Path | None = None, sandbox_enabled: bool = True,
+    ) -> PermissionChecker:
+        return PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(str(root)),
+            rule_engine=RuleEngine(project_rules_path=rules_path),
+            mode=mode,
+            sandbox_enabled=sandbox_enabled,
+        )
+
+    @pytest.mark.parametrize("template", [
+        'cat "{path}"', 'cp inside.txt "{path}"', 'cd "{path}"',
+        'echo value > "{path}"', 'Set-Content -Path "{path}" -Value x',
+        'python "{path}"',
+    ])
+    def test_external_explicit_paths_require_confirmation(
+        self, tmp_path: Path, template: str
+    ) -> None:
+        from valecode.tools.bash import Bash
+
+        root = tmp_path / "project"
+        root.mkdir()
+        outside = Path(tmp_path.anchor) / "valecode-external-boundary-test" / "outside.txt"
+        decision = self._checker(root).check(
+            Bash(), {"command": template.format(path=outside)}
+        )
+        assert decision.effect == "ask"
+        assert "外部路径" in decision.reason
+
+    @pytest.mark.parametrize("command", [
+        "cat $HOME/secret", "type %USERPROFILE%\\secret",
+        "cp inside.txt $(pwd)/out",
+    ])
+    def test_dynamic_file_paths_require_confirmation(
+        self, tmp_path: Path, command: str
+    ) -> None:
+        from valecode.tools.bash import Bash
+
+        decision = self._checker(tmp_path).check(Bash(), {"command": command})
+        assert decision.effect == "ask"
+        assert "动态路径" in decision.reason
+
+    def test_project_path_can_use_verified_os_sandbox_auto_allow(self, tmp_path: Path) -> None:
+        from valecode.tools.bash import Bash
+
+        decision = self._checker(tmp_path).check(
+            Bash(), {"command": f'cat "{tmp_path / "inside.txt"}"'}
+        )
+        assert decision.effect == "allow"
+
+    def test_broad_rule_does_not_grant_external_directory(self, tmp_path: Path) -> None:
+        from valecode.tools.bash import Bash
+
+        root = tmp_path / "project"
+        root.mkdir()
+        rules = root / "rules.yaml"
+        rules.write_text(
+            yaml.safe_dump([{"rule": "Bash(cat *)", "effect": "allow"}]),
+            encoding="utf-8",
+        )
+        outside = Path(tmp_path.anchor) / "valecode-external-boundary-test" / "outside.txt"
+        command = f'cat "{outside}"'
+        checker = self._checker(root, rules_path=rules, sandbox_enabled=False)
+        assert checker.check(Bash(), {"command": command}).effect == "ask"
+        checker.bind_session("session-one")
+        checker.add_session_allow("Bash", {"command": command})
+        assert checker.check(Bash(), {"command": command}).effect == "allow"
+
+    def test_bypass_mode_is_explicit_external_path_override(self, tmp_path: Path) -> None:
+        from valecode.tools.bash import Bash
+
+        root = tmp_path / "project"
+        root.mkdir()
+        outside = Path(tmp_path.anchor) / "valecode-external-boundary-test" / "outside.txt"
+        decision = self._checker(root, mode=PermissionMode.BYPASS).check(
+            Bash(), {"command": f'cat "{outside}"'}
+        )
+        assert decision.effect == "allow"

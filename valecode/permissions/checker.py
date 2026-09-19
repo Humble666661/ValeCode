@@ -11,6 +11,7 @@ from valecode.permissions.modes import DecisionEffect, PermissionMode, mode_deci
 from valecode.permissions.rules import RuleEngine, extract_content, parse_rule
 from valecode.permissions.sandbox import PathSandbox
 from valecode.permissions.session_store import SessionAllowStore
+from valecode.permissions.shell_paths import find_shell_path_issues
 from valecode.tools.base import Tool
 from valecode.tools.todo_write import TodoWrite
 
@@ -157,6 +158,29 @@ class PermissionChecker:
             hit, reason = self.detector.detect(content)
             if hit:
                 return Decision(effect="deny", reason=f"危险命令拦截: {reason}")
+
+        # Explicit file paths used by Bash get an independent external-directory
+        # approval, like OpenCode's shell scanner. A broad Bash allow rule does
+        # not silently grant filesystem access outside the project. BYPASS is
+        # an explicit user choice and OS sandbox policy remains authoritative.
+        if (
+            permission_name == "Bash"
+            and content
+            and self.mode != PermissionMode.BYPASS
+        ):
+            path_issues = find_shell_path_issues(content, self.sandbox)
+            if path_issues:
+                rule_result = self.rule_engine.evaluate(permission_name, content)
+                if rule_result == "deny":
+                    return Decision(effect="deny", reason="权限规则拒绝")
+                if rule_result == "ask":
+                    return Decision(effect="ask", reason="权限规则要求确认")
+                if not self._check_session_allowed(permission_name, arguments):
+                    issue = path_issues[0]
+                    return Decision(
+                        effect="ask",
+                        reason=f"Bash 外部路径需确认: {issue.value}（{issue.reason}）",
+                    )
 
         # Layer 1c: OS 沙箱自动放行
         # 沙箱开启时，命令类工具通过了危险命令检查后直接放行——

@@ -181,6 +181,23 @@ class RunState:
 
 
 @dataclass(frozen=True)
+class RunTraceState:
+    run_id: str
+    session_id: str
+    agent_id: str | None
+    parent_run_id: str | None
+    trace_id: str | None
+    agent_type: str
+    status: RunStatus
+    input_tokens: int
+    output_tokens: int
+    tool_call_count: int
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+
+
+@dataclass(frozen=True)
 class StepState:
     id: str
     run_id: str

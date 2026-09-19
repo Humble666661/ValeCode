@@ -270,6 +270,78 @@ def test_run_step_and_tool_call_lifecycle_is_queryable(database: Database) -> No
     ]
 
 
+def test_run_trace_tree_aggregates_usage_and_finds_root(database: Database) -> None:
+    SessionStore(database).upsert("session-1")
+    runs = RunStore(database)
+    root = runs.create_run(
+        "session-1",
+        agent_id="lead-agent",
+        trace_id="trace-1",
+        metadata={"agent_type": "lead"},
+    )
+    child = runs.create_run(
+        "session-1",
+        agent_id="child-agent",
+        parent_run_id=root.id,
+        trace_id="trace-1",
+        metadata={"agent_type": "Explore"},
+    )
+    grandchild = runs.create_run(
+        "session-1",
+        agent_id="grandchild-agent",
+        parent_run_id=child.id,
+        trace_id="trace-1",
+        metadata={"agent_type": "reviewer"},
+    )
+    sibling = runs.create_run(
+        "session-1",
+        agent_id="sibling-agent",
+        parent_run_id=root.id,
+        trace_id="trace-1",
+        metadata={"agent_type": "Plan"},
+    )
+    unrelated = runs.create_run(
+        "session-1", agent_id="other", trace_id="trace-2"
+    )
+
+    step = runs.create_step(child.id)
+    runs.transition_step(step.id, StepStatus.RUNNING)
+    runs.create_tool_call(child.id, step.id, "ReadFile", {})
+    runs.transition_step(
+        step.id,
+        StepStatus.COMPLETED,
+        input_tokens=21,
+        output_tokens=8,
+    )
+
+    trace = runs.list_trace_nodes(trace_id="trace-1")
+    child_trace = next(node for node in trace if node.run_id == child.id)
+    tree = runs.get_run_tree(grandchild.id)
+
+    assert {node.run_id for node in trace} == {
+        root.id,
+        child.id,
+        grandchild.id,
+        sibling.id,
+    }
+    assert child_trace.agent_type == "Explore"
+    assert child_trace.input_tokens == 21
+    assert child_trace.output_tokens == 8
+    assert child_trace.tool_call_count == 1
+    assert tree[0].run_id == root.id
+    assert {node.run_id for node in tree} == {
+        root.id,
+        child.id,
+        grandchild.id,
+        sibling.id,
+    }
+    assert unrelated.id not in {node.run_id for node in tree}
+    assert runs.get_run_tree("missing") == []
+
+    with pytest.raises(ValueError, match="session_id or trace_id"):
+        runs.list_trace_nodes()
+
+
 def test_illegal_transition_is_rejected(database: Database) -> None:
     SessionStore(database).upsert("session-1")
     runs = RunStore(database)

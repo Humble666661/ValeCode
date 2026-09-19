@@ -18,6 +18,7 @@ from valecode.persistence.models import (
     TOOL_CALL_TRANSITIONS,
     RunState,
     RunStatus,
+    RunTraceState,
     StepState,
     StepStatus,
     ToolCallState,
@@ -196,6 +197,118 @@ class RunStore:
             statuses={RunStatus.PENDING, RunStatus.RUNNING, RunStatus.BLOCKED},
             limit=10_000,
         )
+
+    def list_trace_nodes(
+        self,
+        *,
+        session_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 1_000,
+    ) -> list[RunTraceState]:
+        """Return durable run-tree nodes with aggregated execution usage."""
+        if session_id is None and trace_id is None:
+            raise ValueError("session_id or trace_id is required")
+        limit = max(1, min(int(limit), 10_000))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if session_id is not None:
+            clauses.append("r.session_id = ?")
+            params.append(session_id)
+        if trace_id is not None:
+            clauses.append("r.trace_id = ?")
+            params.append(trace_id)
+        params.append(limit)
+        where = " AND ".join(clauses)
+        with self.database.reader() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT r.*,
+                       COALESCE(s.input_tokens, 0) AS trace_input_tokens,
+                       COALESCE(s.output_tokens, 0) AS trace_output_tokens,
+                       COALESCE(t.tool_call_count, 0) AS trace_tool_call_count
+                FROM runs AS r
+                LEFT JOIN (
+                    SELECT run_id,
+                           SUM(input_tokens) AS input_tokens,
+                           SUM(output_tokens) AS output_tokens
+                    FROM steps
+                    GROUP BY run_id
+                ) AS s ON s.run_id = r.id
+                LEFT JOIN (
+                    SELECT run_id, COUNT(*) AS tool_call_count
+                    FROM tool_calls
+                    GROUP BY run_id
+                ) AS t ON t.run_id = r.id
+                WHERE {where}
+                ORDER BY r.created_at ASC, r.id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        result: list[RunTraceState] = []
+        for row in rows:
+            run = self._run_from_row(row)
+            result.append(
+                RunTraceState(
+                    run_id=run.id,
+                    session_id=run.session_id,
+                    agent_id=run.agent_id,
+                    parent_run_id=run.parent_run_id,
+                    trace_id=run.trace_id,
+                    agent_type=str(
+                        run.metadata.get("agent_type")
+                        or ("lead" if run.parent_run_id is None else "agent")
+                    ),
+                    status=run.status,
+                    input_tokens=int(row["trace_input_tokens"]),
+                    output_tokens=int(row["trace_output_tokens"]),
+                    tool_call_count=int(row["trace_tool_call_count"]),
+                    created_at=run.created_at,
+                    started_at=run.started_at,
+                    completed_at=run.completed_at,
+                )
+            )
+        return result
+
+    def get_run_tree(self, run_id: str) -> list[RunTraceState]:
+        """Return the complete persisted tree containing ``run_id``."""
+        target = self.get_run(run_id)
+        if target is None:
+            return []
+        candidates = self.list_trace_nodes(
+            session_id=target.session_id,
+            trace_id=target.trace_id,
+            limit=10_000,
+        )
+        by_id = {node.run_id: node for node in candidates}
+        current = by_id.get(run_id)
+        if current is None:
+            return []
+        seen: set[str] = set()
+        while current.parent_run_id in by_id and current.run_id not in seen:
+            seen.add(current.run_id)
+            current = by_id[current.parent_run_id]
+        root_id = current.run_id
+
+        children: dict[str, list[RunTraceState]] = {}
+        for node in candidates:
+            if node.parent_run_id is not None:
+                children.setdefault(node.parent_run_id, []).append(node)
+
+        ordered: list[RunTraceState] = []
+        visited: set[str] = set()
+
+        def visit(node_id: str) -> None:
+            if node_id in visited or node_id not in by_id:
+                return
+            visited.add(node_id)
+            ordered.append(by_id[node_id])
+            for child in children.get(node_id, []):
+                visit(child.run_id)
+
+        visit(root_id)
+        return ordered
 
     def transition_run(
         self,

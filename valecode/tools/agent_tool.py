@@ -239,6 +239,7 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
         )
         self._inherit_runtime_state(sub_agent)
+        sub_agent.agent_type = definition.agent_type
 
         # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
         # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
@@ -432,6 +433,7 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
         )
         self._inherit_runtime_state(sub_agent)
+        sub_agent.agent_type = definition.agent_type
         sub_agent.agent_id = agent_id
         sub_agent.team_name = p.team_name
         sub_agent._team_manager = self._team_manager
@@ -634,6 +636,7 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
         )
         self._inherit_runtime_state(sub_agent)
+        sub_agent.agent_type = definition.agent_type
 
         trace_node = self._trace_manager.create(
             agent_type=definition.agent_type,

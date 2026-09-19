@@ -110,7 +110,7 @@ async def test_agent_persists_completed_run_and_step(tmp_path):
     run = sessions.run_store.list_runs(session_id=session.session_id)[0]
     assert run.status == RunStatus.COMPLETED
     assert run.input == "hello"
-    assert run.metadata == {"protocol": "anthropic"}
+    assert run.metadata == {"protocol": "anthropic", "agent_type": "lead"}
     step = sessions.run_store.list_steps(run.id)[0]
     assert step.status == StepStatus.COMPLETED
     assert (step.provider, step.model) == ("test-provider", "test-model")

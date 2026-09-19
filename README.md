@@ -165,7 +165,7 @@ Remote host/port 等配置适合放在 YAML 中。Remote Token 等秘密应放�
 - `/help`：查看所有可用命令。
 - `/session`：列出、恢复、新建或删除会话。
 - `/tasks`：查看和管理后台任务。
-- `/trace`：查看 Agent 父子追踪树。
+- `/trace`：查看 Agent 父子追踪树（包含当前会话重启前的持久记录）。
 - `/permission`：查看或切换权限模式。
 - `/sandbox`：查看沙箱状态。
 - `/worktree`：管理 Git Worktree 会话。

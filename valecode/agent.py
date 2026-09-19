@@ -428,6 +428,7 @@ class Agent:
         self._agent_catalog: str = ""
         self._agent_catalog_list: list[tuple[str, str]] = []
         self.agent_id: str = uuid.uuid4().hex[:12]
+        self.agent_type: str = "lead"
         self.parent_id: str | None = None
         # ``parent_id`` is the tracing agent id. This separate field is a
         # database run id and is therefore safe to use as a foreign key.
@@ -742,7 +743,10 @@ class Agent:
                 agent_id=self.agent_id,
                 parent_run_id=self.parent_run_id,
                 trace_id=trace_id,
-                metadata={"protocol": self.protocol},
+                metadata={
+                    "protocol": self.protocol,
+                    "agent_type": self.agent_type,
+                },
             )
         )
         if run is None:

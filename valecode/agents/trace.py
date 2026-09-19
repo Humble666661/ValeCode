@@ -66,6 +66,9 @@ class TraceManager:
     def get_tree(self, trace_id: str) -> list[TraceNode]:
         return [n for n in self._nodes.values() if n.trace_id == trace_id]
 
+    def list_nodes(self) -> list[TraceNode]:
+        return list(self._nodes.values())
+
 
     def remove(self, agent_id: str) -> None:
         self._nodes.pop(agent_id, None)

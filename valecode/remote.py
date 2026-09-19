@@ -57,7 +57,7 @@ from valecode.permissions import (
     RuleEngine,
 )
 from valecode.skills.loader import SkillLoader
-from valecode.tools import ToolRegistry, create_default_registry
+from valecode.tools import ToolRegistry, ToolSource, create_default_registry
 from valecode.tools.impl.tool_search import ToolSearchTool
 from valecode.tools.load_skill import LoadSkill
 from valecode.web_content import INDEX_HTML
@@ -173,6 +173,7 @@ class RemoteServer:
             self.mcp_manager = None
         if self.registry is not None:
             try:
+                await self.registry.release_source(ToolSource.PLUGIN)
                 await self.registry.release_session()
             except Exception:
                 log.exception("Failed to release remote tool session")
@@ -328,7 +329,7 @@ class RemoteServer:
         client = create_client(provider)
 
         # 工具注册表
-        self.registry = create_default_registry()
+        self.registry = create_default_registry(load_plugins=True)
         self.registry.bind_session(self.session_id)
         self.registry.register(ToolSearchTool(self.registry, protocol=provider.protocol))
         if self._sandbox_config.enabled:

@@ -348,6 +348,21 @@ class ToolRegistry:
     async def release_session(self) -> list[str]:
         return await self.release_scope(self._session_scope_id)
 
+    async def release_source(self, source: ToolSource | str) -> list[str]:
+        resolved_source = self._source(source)
+        scopes = list(dict.fromkeys(
+            entry.scope_id
+            for entry in [
+                *self.list_registrations(active_only=False),
+                *self._retired,
+            ]
+            if entry.source == resolved_source
+        ))
+        released: list[str] = []
+        for scope_id in scopes:
+            released.extend(await self.release_scope(scope_id))
+        return list(dict.fromkeys(released))
+
     @staticmethod
     async def _close_tool(tool: Tool) -> None:
         result = tool.close()

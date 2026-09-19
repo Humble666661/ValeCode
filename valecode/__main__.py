@@ -183,6 +183,9 @@ class _PromptResources:
                 logging.warning("Failed to shut down prompt MCP manager", exc_info=True)
         if self.registry is not None:
             try:
+                from valecode.tools import ToolSource
+
+                await self.registry.release_source(ToolSource.PLUGIN)
                 await self.registry.release_session()
             except Exception:
                 logging.warning("Failed to release prompt tool session", exc_info=True)
@@ -268,7 +271,7 @@ async def _run_prompt(
     session = session_manager.create()
     resources.session = session
     checker.bind_session(session.session_id)
-    registry = create_default_registry()
+    registry = create_default_registry(load_plugins=True)
     resources.registry = registry
     registry.bind_session(session.session_id)
     registry.register(ToolSearchTool(registry, protocol=provider.protocol))

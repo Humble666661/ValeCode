@@ -174,6 +174,23 @@ Remote host/port 等配置适合放在 YAML 中。Remote Token 等秘密应放�
 
 项目和用户还可以通过 `.valecode/commands/` 添加 Markdown 自定义命令。
 
+## Python 工具插件
+
+已安装的 Python 包可以通过 `valecode.tools` entry-point 组贡献工具。入口值可以是
+`Tool` 实例、无参 `Tool` 子类，或返回一个/多个 `Tool` 的同步工厂。例如插件包的
+`pyproject.toml`：
+
+```toml
+[project.entry-points."valecode.tools"]
+my_tools = "my_valecode_plugin:create_tools"
+```
+
+插件工具以 Plugin 层注册，可覆盖同名 Built-in 工具，但仍经过 ValeCode 的权限、
+Hooks、超时和输出预算路径；退出时会调用工具的 `close()`。加载错误会单独记录，
+不会阻止其他插件或 ValeCode 启动。Python 插件在当前进程中运行，拥有与 ValeCode
+相同的系统权限，因此只应安装和启用可信插件；需要进程隔离的外部工具应优先使用
+MCP。
+
 ## 恢复与副作用语义
 
 ValeCode 在启动时扫描遗留 Run，并将未完成状态收敛为可恢复状态：

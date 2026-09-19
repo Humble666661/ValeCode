@@ -9,13 +9,22 @@ from valecode.tools.registry import (
     ToolRegistry,
     ToolSource,
 )
+from valecode.tools.plugins import (
+    PLUGIN_ENTRY_POINT_GROUP,
+    PluginLoadIssue,
+    PluginLoadResult,
+    load_plugin_tools,
+)
 
 if TYPE_CHECKING:
     from valecode.cache import FileCache
 
 
 def create_default_registry(
-    file_cache: FileCache | None = None, file_history: Any = None
+    file_cache: FileCache | None = None,
+    file_history: Any = None,
+    *,
+    load_plugins: bool = False,
 ) -> ToolRegistry:
     from valecode.tools.bash import Bash
     from valecode.tools.edit_file import EditFile
@@ -44,6 +53,10 @@ def create_default_registry(
         Grep(),
     ):
         registry.register(tool, source=ToolSource.BUILTIN, scope_id="builtin")
+    if load_plugins:
+        from valecode.tools.plugins import load_plugin_tools
+
+        load_plugin_tools(registry)
     return registry
 
 
@@ -53,5 +66,9 @@ __all__ = [
     "ToolRegistration",
     "ToolRegistry",
     "ToolSource",
+    "PLUGIN_ENTRY_POINT_GROUP",
+    "PluginLoadIssue",
+    "PluginLoadResult",
     "create_default_registry",
+    "load_plugin_tools",
 ]

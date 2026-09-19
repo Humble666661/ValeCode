@@ -83,7 +83,7 @@ from rich.text import Text as RichText
 from textual.theme import Theme
 from valecode import __version__
 from valecode.cache import FileCache
-from valecode.tools import ToolRegistry, create_default_registry
+from valecode.tools import ToolRegistry, ToolSource, create_default_registry
 from valecode.tools.agent_tool import AgentTool
 from valecode.tools.ask_user import AskUserEvent, AskUserTool
 from valecode.tools.impl.tool_search import ToolSearchTool
@@ -616,7 +616,9 @@ class ValeCodeApp(App):
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
-        self.registry: ToolRegistry = create_default_registry(file_cache=self.file_cache)
+        self.registry: ToolRegistry = create_default_registry(
+            file_cache=self.file_cache, load_plugins=True
+        )
         self.agent: Agent | None = None
         self.mcp_manager: MCPManager | None = None
         self._mcp_init_task: asyncio.Task[None] | None = None
@@ -2050,7 +2052,11 @@ class ValeCodeApp(App):
             if self.hook_engine:
                 tasks.append(asyncio.create_task(_shutdown_hooks()))
             tasks.append(asyncio.create_task(self._shutdown_mcp()))
-            tasks.append(asyncio.create_task(self.registry.release_session()))
+            async def _release_registry_tools() -> None:
+                await self.registry.release_source(ToolSource.PLUGIN)
+                await self.registry.release_session()
+
+            tasks.append(asyncio.create_task(_release_registry_tools()))
 
             if tasks:
                 await asyncio.wait(tasks, timeout=3.0)

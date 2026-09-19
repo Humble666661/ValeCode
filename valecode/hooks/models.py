@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +61,9 @@ class HookContext:
     run_id: str = ""
     step_id: str = ""
     tool_call_id: str = ""
+    agent_runner: Callable[[str], Awaitable[str]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def get_field(self, name: str) -> str:
         if name == "tool":

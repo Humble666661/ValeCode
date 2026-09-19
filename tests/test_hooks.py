@@ -284,14 +284,31 @@ class TestHttpExecutor:
 
 class TestAgentExecutor:
     @pytest.mark.asyncio
-    async def test_stub(self):
+    async def test_requires_agent_runtime(self):
         from valecode.hooks.executors import execute_agent
 
         action = Action(type="agent", prompt="Check $FILE_PATH")
         ctx = HookContext(file_path="test.py")
         result = await execute_agent(action, ctx)
-        assert result.success is True
-        assert "not yet implemented" in result.output
+        assert result.success is False
+        assert "unavailable" in result.output
+
+    @pytest.mark.asyncio
+    async def test_expands_prompt_and_invokes_runtime(self):
+        from valecode.hooks.executors import execute_agent
+
+        prompts: list[str] = []
+
+        async def runner(prompt: str) -> str:
+            prompts.append(prompt)
+            return "review complete"
+
+        action = Action(type="agent", prompt="Check $FILE_PATH")
+        ctx = HookContext(file_path="test.py", agent_runner=runner)
+        result = await execute_agent(action, ctx)
+
+        assert result == ActionResult(output="review complete", success=True)
+        assert prompts == ["Check test.py"]
 
 class TestExecuteAction:
     @pytest.mark.asyncio

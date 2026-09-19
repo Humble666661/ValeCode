@@ -392,6 +392,7 @@ class Agent:
         self.instructions_content = instructions_content
         self.memory_manager = memory_manager
         self.hook_engine = hook_engine
+        self._hook_agent_lock = asyncio.Lock()
         self.run_store = run_store
         run_database = getattr(run_store, "database", None)
         self.result_artifact_store = (
@@ -558,7 +559,35 @@ class Agent:
             run_id=self._current_run_id or "",
             step_id=self._current_step_id or "",
             tool_call_id=str(kwargs.get("tool_call_id", "")),
+            agent_runner=self._run_hook_agent,
         )
+
+    async def _run_hook_agent(self, prompt: str) -> str:
+        """Run an isolated, tool-free model call for an ``agent`` hook action."""
+        async with self._hook_agent_lock:
+            conversation = ConversationManager()
+            conversation.add_user_message(prompt)
+            collector = StreamCollector()
+            stream = self.client.stream(
+                conversation,
+                system=(
+                    "You are an isolated hook evaluator. Follow the hook prompt and "
+                    "return concise plain text. You cannot call tools and must not "
+                    "claim to have changed files or external state."
+                ),
+                tools=[],
+            )
+            async for _event in collector.consume(stream):
+                pass
+            response = collector.response
+            if response.tool_calls:
+                raise RuntimeError("Agent hook attempted to call a tool")
+            output = response.text.strip()
+            if not output:
+                raise RuntimeError("Agent hook returned no text")
+            self.total_input_tokens += response.input_tokens
+            self.total_output_tokens += response.output_tokens
+            return output
 
     def _infer_file_path(self, args: dict) -> str:
         return str(args.get("file_path", args.get("path", "")))

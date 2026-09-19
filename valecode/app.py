@@ -974,7 +974,7 @@ class ValeCodeApp(App):
         if self.hook_engine:
             asyncio.ensure_future(
                 self.hook_engine.run_hooks(
-                    "startup", HookContext(event_name="startup")
+                    "startup", self.agent._build_hook_context("startup")
                 )
             )
 
@@ -2034,7 +2034,12 @@ class ValeCodeApp(App):
             async def _shutdown_hooks() -> None:
                 assert self.hook_engine is not None
                 await self.hook_engine.run_hooks(
-                    "shutdown", HookContext(event_name="shutdown")
+                    "shutdown",
+                    (
+                        self.agent._build_hook_context("shutdown")
+                        if self.agent is not None
+                        else HookContext(event_name="shutdown")
+                    ),
                 )
                 await self.hook_engine.shutdown()
 

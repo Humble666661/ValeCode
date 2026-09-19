@@ -74,6 +74,8 @@ class _FailingClient(LLMClient):
 class _CompletionClient(LLMClient):
     def __init__(self) -> None:
         self.systems: list[str] = []
+        self.prompts: list[str] = []
+        self.tool_batches: list[list[dict[str, Any]]] = []
 
     async def stream(
         self,
@@ -82,8 +84,21 @@ class _CompletionClient(LLMClient):
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self.systems.append(system)
+        self.prompts.append(conversation.history[-1].content)
+        self.tool_batches.append(list(tools or []))
         yield TextDelta("done")
         yield StreamEnd("end_turn", input_tokens=2, output_tokens=1)
+
+
+class _ToolCallingClient(LLMClient):
+    async def stream(
+        self,
+        conversation: ConversationManager,
+        system: str = "",
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        yield ToolCallComplete("unexpected", "WriteFile", {"file_path": "x"})
+        yield StreamEnd("tool_use", input_tokens=2, output_tokens=1)
 
 
 def _engine(*events: str) -> HookEngine:
@@ -225,3 +240,54 @@ async def test_run_to_completion_dispatches_full_message_lifecycle(tmp_path) -> 
     assert [note.event for note in notifications] == list(lifecycle)
     assert "context:session_start" in client.systems[0]
     assert "context:pre_send" in client.systems[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_hook_uses_isolated_tool_free_model_call(tmp_path) -> None:
+    engine = HookEngine([
+        Hook(
+            id="review-change", event="file_change",
+            action=Action(type="agent", prompt="Review $FILE_PATH"),
+        )
+    ])
+    client = _CompletionClient()
+    agent = Agent(
+        client, ToolRegistry(), "anthropic",
+        work_dir=str(tmp_path), hook_engine=engine,
+    )
+
+    await engine.run_hooks(
+        "file_change",
+        agent._build_hook_context("file_change", file_path="notes.txt"),
+    )
+
+    notifications = engine.drain_notifications()
+    assert len(notifications) == 1
+    assert notifications[0].success is True
+    assert notifications[0].output == "done"
+    assert client.prompts == ["Review notes.txt"]
+    assert client.tool_batches == [[]]
+    assert "isolated hook evaluator" in client.systems[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_hook_fails_closed_on_tool_attempt(tmp_path) -> None:
+    engine = HookEngine([
+        Hook(
+            id="no-tools", event="session_start",
+            action=Action(type="agent", prompt="Try to edit a file"),
+        )
+    ])
+    agent = Agent(
+        _ToolCallingClient(), ToolRegistry(), "anthropic",
+        work_dir=str(tmp_path), hook_engine=engine,
+    )
+
+    await engine.run_hooks(
+        "session_start", agent._build_hook_context("session_start")
+    )
+
+    notification = engine.drain_notifications()[0]
+    assert notification.success is False
+    assert notification.error_type == "RuntimeError"
+    assert "attempted to call a tool" in notification.output

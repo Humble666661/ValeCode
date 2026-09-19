@@ -88,11 +88,13 @@ async def execute_http(action: Action, ctx: HookContext) -> ActionResult:
 
 async def execute_agent(action: Action, ctx: HookContext) -> ActionResult:
     prompt = ctx.expand(action.prompt)
-    log.info("Agent executor stub called with prompt: %s", prompt[:100])
-    return ActionResult(
-        output="agent executor not yet implemented",
-        success=True,
-    )
+    if ctx.agent_runner is None:
+        return ActionResult(
+            output="Agent hook is unavailable outside an Agent runtime",
+            success=False,
+        )
+    output = await ctx.agent_runner(prompt)
+    return ActionResult(output=output, success=True)
 
 
 _EXECUTOR_MAP = {

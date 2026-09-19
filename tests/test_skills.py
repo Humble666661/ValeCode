@@ -2,10 +2,11 @@
 """Skill 系统的测试 —— 包括 parser、loader、executor 以及 LoadSkill 工具。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -598,6 +599,55 @@ class TestSkillExecutor:
         assert created["activated"][0] == "review"
         assert "Review now" in created["activated"][1]
         assert created["activated"][2] == {}
+
+
+@pytest.mark.asyncio
+async def test_remote_registers_skill_tools_and_slash_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from valecode.config import ProviderConfig
+    from valecode.remote import RemoteServer
+    from valecode.tools.install_skill import InstallSkillTool
+
+    monkeypatch.chdir(tmp_path)
+    provider = ProviderConfig(
+        name="offline",
+        protocol="anthropic",
+        base_url="https://example.invalid",
+        model="offline",
+        api_key="not-used",
+    )
+    with patch("valecode.remote.create_client", return_value=MagicMock()):
+        server = RemoteServer([provider])
+        server._init_agent()
+
+    assert isinstance(server.registry.get("InstallSkill"), InstallSkillTool)
+    command = server.command_registry.find("customize-valecode")
+    assert command is not None
+    context = server._build_command_context("update config")
+    assert context.config["skill_loader"] is server.skill_loader
+    assert context.config["skill_executor"] is server.skill_executor
+
+    server.send_user_message = MagicMock()
+    await command.handler(context)
+
+    assert "# Skill: customize-valecode" in server.conversation.history[-1].content
+    server.send_user_message.assert_called_once_with("update config")
+    await server._shutdown()
+
+
+@pytest.mark.asyncio
+async def test_remote_ui_prompt_callback_bypasses_command_redispatch() -> None:
+    from valecode.remote import RemoteServer
+
+    server = RemoteServer([])
+    server._handle_user_message = AsyncMock()
+    server.send_user_message("/customize-valecode")
+    await asyncio.sleep(0)
+
+    server._handle_user_message.assert_called_once_with(
+        "/customize-valecode", dispatch_commands=False
+    )
 
 # ---------------------------------------------------------------------------
 # Agent 集成

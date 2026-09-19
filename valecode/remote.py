@@ -42,6 +42,7 @@ from valecode.agent import (
 from valecode.client import create_client, resolve_context_window
 from valecode.commands import CommandContext, CommandRegistry, CommandType
 from valecode.commands.handlers import register_all_commands
+from valecode.commands.handlers.skill_register import register_skill_commands
 from valecode.commands.parser import parse_command
 from valecode.config import MCPServerConfig, ProviderConfig, SandboxAppConfig
 from valecode.conversation import ConversationManager
@@ -57,8 +58,10 @@ from valecode.permissions import (
     RuleEngine,
 )
 from valecode.skills.loader import SkillLoader
+from valecode.skills.executor import SkillExecutor
 from valecode.tools import ToolRegistry, ToolSource, create_default_registry
 from valecode.tools.impl.tool_search import ToolSearchTool
+from valecode.tools.install_skill import InstallSkillTool
 from valecode.tools.load_skill import LoadSkill
 from valecode.web_content import INDEX_HTML
 
@@ -125,6 +128,8 @@ class RemoteServer:
 
         # Skill 加载器
         self.skill_loader: SkillLoader | None = None
+        self.skill_executor: SkillExecutor | None = None
+        self._install_skill_tool: InstallSkillTool | None = None
 
         # Memory / Session
         self.memory_manager: MemoryManager | None = None
@@ -350,6 +355,9 @@ class RemoteServer:
         self.skill_loader.load_all()
         load_skill_tool = LoadSkill()
         self.registry.register(load_skill_tool)
+        install_skill_tool = InstallSkillTool()
+        self.registry.register(install_skill_tool)
+        self._install_skill_tool = install_skill_tool
 
         # 创建 Agent
         self.agent = Agent(
@@ -376,6 +384,36 @@ class RemoteServer:
         # 连接 Skill 到 Agent
         load_skill_tool.set_loader(self.skill_loader)
         load_skill_tool.set_agent(self.agent)
+        install_skill_tool.set_loader(self.skill_loader)
+        self.skill_executor = SkillExecutor(
+            agent=self.agent,
+            client=client,
+            protocol=provider.protocol,
+            provider_config=provider,
+        )
+        register_skill_commands(
+            self.command_registry,
+            self.skill_loader,
+            self.skill_executor,
+        )
+
+        def _on_skill_installed(_name: str) -> None:
+            assert self.skill_loader is not None
+            register_skill_commands(
+                self.command_registry,
+                self.skill_loader,
+                self.skill_executor,
+            )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.create_task(self._broadcast({
+                "type": "commands",
+                "data": self._build_command_list(),
+            }))
+
+        install_skill_tool.set_on_installed(_on_skill_installed)
 
         catalog = self.skill_loader.get_catalog()
         if catalog:
@@ -431,13 +469,15 @@ class RemoteServer:
     # 用户消息处理
     # ------------------------------------------------------------------
 
-    async def _handle_user_message(self, content: str) -> None:
+    async def _handle_user_message(
+        self, content: str, *, dispatch_commands: bool = True,
+    ) -> None:
         """处理来自 Web UI 的用户消息或斜杠命令。"""
         if self._streaming:
             return
 
         # 斜杠命令
-        if content.startswith("/"):
+        if dispatch_commands and content.startswith("/"):
             await self._handle_slash_command(content)
             return
 
@@ -691,6 +731,8 @@ class RemoteServer:
             ui=self,  # type: ignore[arg-type]
             config={
                 "registry": self.command_registry,
+                "skill_loader": self.skill_loader,
+                "skill_executor": self.skill_executor,
             },
         )
 
@@ -736,7 +778,9 @@ class RemoteServer:
 
     def send_user_message(self, text: str) -> None:
         """同步接口 — 注入用户消息并触发 agent。"""
-        asyncio.create_task(self._handle_user_message(text))
+        asyncio.create_task(
+            self._handle_user_message(text, dispatch_commands=False)
+        )
 
     def set_plan_mode(self, enabled: bool) -> None:
         if self.agent is None:

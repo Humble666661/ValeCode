@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
+from valecode.skills.content import render_skill_content
 from valecode.tools.base import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -56,9 +57,10 @@ class LoadSkill(Tool):
                 is_error=True,
             )
 
-        self._agent.activate_skill(
-            skill.name, skill.prompt_body, skill.permission_rules
-        )
+        rendered = render_skill_content(skill)
+        self._agent.activate_skill(skill.name, rendered, skill.permission_rules)
+        recovery = getattr(self._agent, "recovery_state", None)
+        if recovery is not None:
+            recovery.record_skill_invocation(skill.name, rendered)
 
-        header = f"# Skill: {skill.name}\n\n"
-        return ToolResult(output=header + skill.prompt_body)
+        return ToolResult(output=rendered)

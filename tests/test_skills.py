@@ -18,6 +18,7 @@ from valecode.skills.parser import (
 )
 from valecode.skills.loader import SkillLoader
 from valecode.skills.executor import SkillExecutor
+from valecode.skills.content import list_skill_support_files, render_skill_content
 from valecode.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -334,6 +335,45 @@ class TestSkillLoader:
         assert isinstance(skills, dict)
 
 
+class TestSkillContent:
+    def test_directory_skill_lists_bounded_support_files(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / ".valecode" / "skills" / "review"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "references").mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: review\ndescription: Review\n---\nFollow the guide."
+        )
+        (skill_dir / "scripts" / "check.py").write_text("print('ok')")
+        (skill_dir / "references" / "guide.md").write_text("guide")
+        (skill_dir / ".env").write_text("SECRET=value")
+        loader = SkillLoader(str(tmp_path))
+        skill = loader.load_all()["review"]
+
+        files = list_skill_support_files(skill)
+        rendered = render_skill_content(skill)
+
+        assert files == [
+            (skill_dir / "references" / "guide.md").resolve(),
+            (skill_dir / "scripts" / "check.py").resolve(),
+        ]
+        assert str(skill_dir.resolve()) in rendered
+        assert str(files[0]) in rendered and str(files[1]) in rendered
+        assert "SKILL.md" not in rendered
+        assert ".env" not in rendered
+        assert "permissions and sandbox rules still apply" in rendered
+
+    def test_single_file_skill_does_not_expose_sibling_directory(self, tmp_path: Path) -> None:
+        skill_path = tmp_path / "review.md"
+        skill_path.write_text(
+            "---\nname: review\ndescription: Review\n---\nReview carefully."
+        )
+        (tmp_path / "unrelated.txt").write_text("private")
+        skill = parse_skill_file(skill_path)
+
+        assert list_skill_support_files(skill) == []
+        assert "Base directory" not in render_skill_content(skill)
+
+
 # ---------------------------------------------------------------------------
 # LoadSkill 工具
 # ---------------------------------------------------------------------------
@@ -347,6 +387,7 @@ class TestLoadSkillTool:
         loader = MagicMock()
         agent = MagicMock()
         agent.registry = ToolRegistry()
+        agent.recovery_state = None
 
         skill = SkillDef(
             name="commit",
@@ -362,7 +403,10 @@ class TestLoadSkillTool:
         result = await tool.execute(LoadSkillParams(name="commit"))
         assert not result.is_error
         assert "# Skill: commit" in result.output and "Do commit" in result.output
-        agent.activate_skill.assert_called_once_with("commit", "Do commit", {})
+        activated = agent.activate_skill.call_args.args
+        assert activated[0] == "commit" and activated[2] == {}
+        assert "# Skill: commit" in activated[1]
+        assert "Do commit" in activated[1]
 
     @pytest.mark.asyncio
     async def test_load_unknown_skill(self) -> None:
@@ -415,9 +459,9 @@ class TestSkillExecutor:
         prompt = executor.execute_inline(skill, "src/app.py", conversation)
 
         assert prompt == "Review src/app.py carefully"
-        agent.activate_skill.assert_called_once_with(
-            "review", "Review src/app.py carefully", {}
-        )
+        activated = agent.activate_skill.call_args.args
+        assert activated[0] == "review" and activated[2] == {}
+        assert "Review src/app.py carefully" in activated[1]
         assert len(conversation.history) == 1
         assert "# Skill: review" in conversation.history[0].content
         assert "Review src/app.py carefully" in conversation.history[0].content
@@ -546,7 +590,9 @@ class TestSkillExecutor:
         assert created["provider_name"] == "skill-review"
         assert created["protocol"] == "openai-compat"
         assert created["context_window"] == 32_000
-        assert created["activated"] == ("review", "Review now", {})
+        assert created["activated"][0] == "review"
+        assert "Review now" in created["activated"][1]
+        assert created["activated"][2] == {}
 
 # ---------------------------------------------------------------------------
 # Agent 集成

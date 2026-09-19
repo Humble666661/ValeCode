@@ -181,7 +181,9 @@ Remote host/port 等配置适合放在 YAML 中。Remote Token 等秘密应放�
 通过 `LoadSkill` 按需加载，也可以直接使用同名 `/<skill> [args]` 命令。inline 模式
 会把完整正文作为一次性上下文注入当前对话；fork 模式在独立上下文执行，并可通过
 frontmatter 的 `model` 字段切换到当前 Provider 上的其他模型或 `haiku`、`sonnet`、
-`opus` 别名。Skill 声明的工具权限仍受项目权限、危险命令检测和沙箱边界约束。
+`opus` 别名。目录 Skill 激活时会向模型提供基准目录和有限的支持文件清单，正文中
+引用的 `scripts/`、`references/` 等资源仍通过标准文件/Shell 工具使用。Skill 声明
+的工具权限仍受项目权限、危险命令检测和沙箱边界约束。
 
 ## Python 工具插件
 

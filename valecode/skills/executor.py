@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from valecode.conversation import ConversationManager, Message
+from valecode.skills.content import render_skill_content
 from valecode.skills.parser import SkillDef, substitute_arguments
 
 if TYPE_CHECKING:
@@ -39,12 +40,13 @@ class SkillExecutor:
         conversation: ConversationManager | None = None,
     ) -> str:
         prompt = substitute_arguments(skill.prompt_body, args)
-        self.agent.activate_skill(skill.name, prompt, skill.permission_rules)
+        rendered = render_skill_content(skill, prompt)
+        self.agent.activate_skill(skill.name, rendered, skill.permission_rules)
         target = conversation or getattr(self.agent, "_current_conversation", None)
         if target is not None:
-            target.add_system_reminder(f"# Skill: {skill.name}\n\n{prompt}")
+            target.add_system_reminder(rendered)
         if getattr(self.agent, "recovery_state", None) is not None:
-            self.agent.recovery_state.record_skill_invocation(skill.name, prompt)
+            self.agent.recovery_state.record_skill_invocation(skill.name, rendered)
         return prompt
 
     def _resolve_fork_runtime(
@@ -105,9 +107,10 @@ class SkillExecutor:
         self, skill: SkillDef, args: str
     ) -> str:
         prompt = substitute_arguments(skill.prompt_body, args)
+        rendered = render_skill_content(skill, prompt)
         if getattr(self.agent, "recovery_state", None) is not None:
             self.agent.recovery_state.record_skill_invocation(
-                skill.name, skill.prompt_body
+                skill.name, rendered
             )
 
         fork_conv = ConversationManager()
@@ -119,7 +122,7 @@ class SkillExecutor:
             else:
                 fork_conv.add_assistant_message(msg.content)
 
-        fork_conv.add_user_message(prompt)
+        fork_conv.add_user_message(rendered)
 
         from valecode.agent import Agent as AgentClass, StreamText, LoopComplete, ErrorEvent
 
@@ -145,7 +148,7 @@ class SkillExecutor:
             model=model,
         )
         fork_agent.activate_skill(
-            skill.name, prompt, skill.permission_rules
+            skill.name, rendered, skill.permission_rules
         )
 
         result_parts: list[str] = []

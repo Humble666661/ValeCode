@@ -270,6 +270,8 @@ def validate_background_tasks(raw_tasks: dict | None) -> dict:
         "per_team_concurrency": 4,
         "retry_base_seconds": 1.0,
         "retry_max_seconds": 30.0,
+        "result_retention_days": 30.0,
+        "result_gc_interval": 3600.0,
     }
     if raw_tasks is None:
         return defaults
@@ -283,6 +285,8 @@ def validate_background_tasks(raw_tasks: dict | None) -> dict:
         "maintenance_interval",
         "retry_base_seconds",
         "retry_max_seconds",
+        "result_retention_days",
+        "result_gc_interval",
     )
     for key in duration_fields:
         if key not in raw_tasks:

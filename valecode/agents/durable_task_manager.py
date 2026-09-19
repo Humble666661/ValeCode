@@ -34,6 +34,8 @@ class DurableTaskManager(TaskManager):
         retry_base_seconds: float = 1.0,
         retry_max_seconds: float = 30.0,
         maintenance_interval: float = 10.0,
+        result_retention_days: float = 30.0,
+        result_gc_interval: float = 3600.0,
     ) -> None:
         super().__init__()
         self.task_store = task_store
@@ -45,6 +47,9 @@ class DurableTaskManager(TaskManager):
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.maintenance_interval = max(0.05, maintenance_interval)
+        self.result_retention_days = max(0.001, result_retention_days)
+        self.result_gc_interval = max(0.05, result_gc_interval)
+        self._last_result_gc = 0.0
         self._maintenance_task: asyncio.Task[None] | None = None
         self._global_capacity = asyncio.Semaphore(max(1, max_concurrency))
         self._team_limit = max(1, per_team_concurrency)
@@ -67,6 +72,8 @@ class DurableTaskManager(TaskManager):
             "per_team_concurrency",
             "retry_base_seconds",
             "retry_max_seconds",
+            "result_retention_days",
+            "result_gc_interval",
         )
         values = {
             name: getattr(config, name)
@@ -96,8 +103,78 @@ class DurableTaskManager(TaskManager):
                         "Recovered %d expired background task lease(s)",
                         len(recovered),
                     )
+                if time.monotonic() - self._last_result_gc >= self.result_gc_interval:
+                    try:
+                        self.cleanup_result_artifacts()
+                    except Exception:
+                        log.exception("Unable to clean background task result artifacts")
+                    finally:
+                        self._last_result_gc = time.monotonic()
         except asyncio.CancelledError:
             return
+
+    def cleanup_result_artifacts(self, *, now: datetime | None = None) -> int:
+        """Delete expired task result files without crossing the state directory."""
+        current = now or datetime.now(UTC)
+        cutoff = current - timedelta(days=self.result_retention_days)
+        directory = (self.task_store.database.path.parent / "task-results").resolve()
+        removed = 0
+        referenced: set[Path] = set()
+
+        for state in self.task_store.list_with_result_paths():
+            raw_path = state.result_path
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved.parent != directory:
+                log.warning("Skipping task result outside managed directory: %s", path)
+                continue
+            referenced.add(resolved)
+            timestamp = state.completed_at or state.updated_at
+            try:
+                expired = datetime.fromisoformat(timestamp) <= cutoff
+            except (TypeError, ValueError):
+                expired = False
+            if not expired:
+                continue
+            try:
+                resolved.unlink(missing_ok=True)
+            except OSError:
+                log.warning("Unable to delete expired task result %s", resolved)
+                continue
+            if self.task_store.clear_result_path(state.id, raw_path):
+                referenced.discard(resolved)
+                removed += 1
+
+        if not directory.is_dir():
+            return removed
+        for candidate in directory.iterdir():
+            if not candidate.is_file() and not candidate.is_symlink():
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved.parent != directory or resolved in referenced:
+                continue
+            try:
+                modified = datetime.fromtimestamp(
+                    candidate.stat().st_mtime, tz=UTC
+                )
+            except OSError:
+                continue
+            if modified > cutoff:
+                continue
+            try:
+                candidate.unlink()
+                removed += 1
+            except OSError:
+                log.warning("Unable to delete orphaned task result %s", candidate)
+        return removed
 
     def launch(
         self,

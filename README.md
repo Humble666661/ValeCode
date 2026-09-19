@@ -274,10 +274,13 @@ background_tasks:
   per_team_concurrency: 4
   retry_base_seconds: 1
   retry_max_seconds: 30
+  result_retention_days: 30
+  result_gc_interval: 3600
 ```
 
 `heartbeat_interval` 在运行时不会超过 lease 时长的一半；重试最大间隔不能小于
-基础间隔。TUI、`-p` 和 Remote 使用同一组配置。
+基础间隔。大结果的完整文件默认保留 30 天，过期后删除完整文件但保留数据库中的
+截断摘要。TUI、`-p` 和 Remote 使用同一组配置。
 
 ## 开发与测试
 
@@ -286,7 +289,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **798 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **800 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

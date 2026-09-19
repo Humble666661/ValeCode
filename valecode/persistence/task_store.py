@@ -136,6 +136,44 @@ class TaskStore:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def list_with_result_paths(self) -> list[TaskState]:
+        with self.database.reader() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE result_path IS NOT NULL
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def clear_result_path(self, task_id: str, expected_path: str) -> bool:
+        """Clear one result pointer only if it still matches the inspected path."""
+        now = utc_now()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT session_id, run_id, result_path FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None or row["result_path"] != expected_path:
+                return False
+            connection.execute(
+                """
+                UPDATE tasks SET result_path = NULL, updated_at = ?,
+                    version = version + 1 WHERE id = ?
+                """,
+                (now, task_id),
+            )
+            self.events._append(
+                connection,
+                "task.result_released",
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                task_id=task_id,
+                payload={"result_path": expected_path},
+            )
+        return True
+
     def list(
         self,
         *,

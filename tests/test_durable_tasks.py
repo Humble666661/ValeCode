@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -35,6 +36,8 @@ def test_durable_manager_uses_shared_background_task_config(tmp_path):
         per_team_concurrency=2,
         retry_base_seconds=2.0,
         retry_max_seconds=12.0,
+        result_retention_days=14.0,
+        result_gc_interval=120.0,
     )
 
     manager = DurableTaskManager.from_config(sessions.task_store, config)
@@ -46,6 +49,8 @@ def test_durable_manager_uses_shared_background_task_config(tmp_path):
     assert manager._team_limit == 2
     assert manager.retry_base_seconds == 2.0
     assert manager.retry_max_seconds == 12.0
+    assert manager.result_retention_days == 14.0
+    assert manager.result_gc_interval == 120.0
 
 
 def test_task_store_claim_enforces_dependencies_and_leases(tmp_path):
@@ -195,6 +200,63 @@ async def test_large_task_result_is_offloaded(tmp_path):
     assert state.result_path is not None
     assert "full result stored" in state.result["output"]
     assert Path(state.result_path).read_text(encoding="utf-8") == output
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_and_orphaned_task_results_are_garbage_collected(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    output = "x" * (RESULT_INLINE_LIMIT + 100)
+    manager = DurableTaskManager(
+        sessions.task_store,
+        result_retention_days=30,
+    )
+    task_id = manager.launch(make_agent(session.session_id, output), "large")
+    await manager._async_tasks[task_id]
+    state = sessions.task_store.get(task_id)
+    result_path = Path(state.result_path)
+    orphan = result_path.parent / "orphan.txt"
+    orphan.write_text("orphan", encoding="utf-8")
+
+    removed = manager.cleanup_result_artifacts(
+        now=datetime.now(UTC) + timedelta(days=31)
+    )
+
+    refreshed = sessions.task_store.get(task_id)
+    assert removed == 2
+    assert result_path.exists() is False
+    assert orphan.exists() is False
+    assert refreshed.result_path is None
+    assert "full result stored" in refreshed.result["output"]
+    session.close()
+
+
+def test_result_gc_refuses_paths_outside_managed_directory(tmp_path):
+    sessions = SessionManager(str(tmp_path / "project"))
+    session = sessions.create()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    task = sessions.task_store.create(
+        {"task": "unsafe path"}, session_id=session.session_id
+    )
+    sessions.task_store.transition(
+        task.id,
+        TaskStatus.CANCELLED,
+        result_path=str(outside),
+    )
+    manager = DurableTaskManager(
+        sessions.task_store,
+        result_retention_days=1,
+    )
+
+    removed = manager.cleanup_result_artifacts(
+        now=datetime.now(UTC) + timedelta(days=2)
+    )
+
+    assert removed == 0
+    assert outside.read_text(encoding="utf-8") == "keep"
+    assert sessions.task_store.get(task.id).result_path == str(outside)
     session.close()
 
 

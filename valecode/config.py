@@ -203,6 +203,8 @@ class BackgroundTaskConfig:
     per_team_concurrency: int = 4
     retry_base_seconds: float = 1.0
     retry_max_seconds: float = 30.0
+    result_retention_days: float = 30.0
+    result_gc_interval: float = 3600.0
     _specified_fields: frozenset[str] = field(
         default_factory=frozenset, repr=False, compare=False
     )
@@ -288,6 +290,8 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
         per_team_concurrency=task_data["per_team_concurrency"],
         retry_base_seconds=task_data["retry_base_seconds"],
         retry_max_seconds=task_data["retry_max_seconds"],
+        result_retention_days=task_data["result_retention_days"],
+        result_gc_interval=task_data["result_gc_interval"],
     )
 
     return AppConfig(

@@ -188,7 +188,9 @@ def test_background_task_configuration_loads_and_validates(
         "  max_concurrency: 6\n"
         "  per_team_concurrency: 2\n"
         "  retry_base_seconds: 2\n"
-        "  retry_max_seconds: 12\n",
+        "  retry_max_seconds: 12\n"
+        "  result_retention_days: 14\n"
+        "  result_gc_interval: 120\n",
         encoding="utf-8",
     )
 
@@ -201,6 +203,8 @@ def test_background_task_configuration_loads_and_validates(
     assert config.background_tasks.per_team_concurrency == 2
     assert config.background_tasks.retry_base_seconds == 2.0
     assert config.background_tasks.retry_max_seconds == 12.0
+    assert config.background_tasks.result_retention_days == 14.0
+    assert config.background_tasks.result_gc_interval == 120.0
 
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(

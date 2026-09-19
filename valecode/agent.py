@@ -2286,13 +2286,10 @@ class Agent:
         if task:
             conversation.add_user_message(task)
 
-        hook_prompts = (
-            self.hook_engine.get_prompt_messages() if self.hook_engine else None
-        )
-        system = build_system_prompt(
-            hook_prompts=hook_prompts,
-            coordinator_mode=self.coordinator_mode,
-        )
+        if self.hook_engine:
+            await self.hook_engine.run_hooks(
+                "session_start", self._build_hook_context("session_start")
+            )
 
         tools = self.registry.get_all_schemas(self.protocol)
 
@@ -2328,6 +2325,19 @@ class Agent:
             if self.notification_fn:
                 for note in self.notification_fn():
                     conversation.add_system_reminder(note)
+
+            if self.hook_engine:
+                await self.hook_engine.run_hooks(
+                    "pre_send", self._build_hook_context("pre_send")
+                )
+
+            hook_prompts = (
+                self.hook_engine.get_prompt_messages() if self.hook_engine else None
+            )
+            system = build_system_prompt(
+                hook_prompts=hook_prompts,
+                coordinator_mode=self.coordinator_mode,
+            )
 
             # Build a model-only budget view without mutating durable history.
             api_conversation, pre_compact_records = apply_tool_result_budget(
@@ -2371,6 +2381,13 @@ class Agent:
                 pass
 
             response = collector.response
+            if self.hook_engine:
+                await self.hook_engine.run_hooks(
+                    "post_receive",
+                    self._build_hook_context(
+                        "post_receive", message=response.text
+                    ),
+                )
             self.total_input_tokens += response.input_tokens
             self.total_output_tokens += response.output_tokens
 
@@ -2399,6 +2416,13 @@ class Agent:
 
             if not response.tool_calls:
                 conversation.add_assistant_message(response.text)
+                if self.hook_engine:
+                    await self.hook_engine.run_hooks(
+                        "turn_end", self._build_hook_context("turn_end")
+                    )
+                    await self.hook_engine.run_hooks(
+                        "session_end", self._build_hook_context("session_end")
+                    )
                 if self.file_history is not None:
                     summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
                     self.file_history.make_snapshot(len(conversation.history), summary)

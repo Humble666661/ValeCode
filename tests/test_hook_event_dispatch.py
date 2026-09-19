@@ -22,7 +22,9 @@ from valecode.permissions import (
 )
 from valecode.tools import ToolRegistry
 from valecode.tools.base import (
+    StreamEnd,
     StreamEvent,
+    TextDelta,
     Tool,
     ToolCallComplete,
     ToolResult,
@@ -67,6 +69,21 @@ class _FailingClient(LLMClient):
     ) -> AsyncIterator[StreamEvent]:
         raise RuntimeError("provider exploded")
         yield  # pragma: no cover - keeps this an async generator
+
+
+class _CompletionClient(LLMClient):
+    def __init__(self) -> None:
+        self.systems: list[str] = []
+
+    async def stream(
+        self,
+        conversation: ConversationManager,
+        system: str = "",
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.systems.append(system)
+        yield TextDelta("done")
+        yield StreamEnd("end_turn", input_tokens=2, output_tokens=1)
 
 
 def _engine(*events: str) -> HookEngine:
@@ -181,3 +198,30 @@ async def test_error_hook_preserves_original_agent_exception(tmp_path) -> None:
     notifications = engine.drain_notifications()
     assert [note.event for note in notifications] == ["error"]
     assert "RuntimeError: provider exploded" in notifications[0].output
+
+
+@pytest.mark.asyncio
+async def test_run_to_completion_dispatches_full_message_lifecycle(tmp_path) -> None:
+    lifecycle = (
+        "session_start", "turn_start", "pre_send", "post_receive",
+        "turn_end", "session_end",
+    )
+    engine = HookEngine([
+        Hook(
+            id=f"observe-{event}", event=event,
+            action=Action(type="prompt", message=f"context:{event}"),
+        )
+        for event in lifecycle
+    ])
+    client = _CompletionClient()
+    agent = Agent(
+        client, ToolRegistry(), "anthropic",
+        work_dir=str(tmp_path), hook_engine=engine,
+    )
+
+    assert await agent.run_to_completion("finish") == "done"
+
+    notifications = engine.drain_notifications()
+    assert [note.event for note in notifications] == list(lifecycle)
+    assert "context:session_start" in client.systems[0]
+    assert "context:pre_send" in client.systems[0]

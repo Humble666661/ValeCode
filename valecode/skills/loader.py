@@ -122,13 +122,17 @@ class SkillLoader:
         mode = meta.get("mode", "inline")
         if mode not in ("inline", "fork"):
             mode = "inline"
+        model = meta.get("model")
+        if model is not None and (not isinstance(model, str) or not model.strip()):
+            log.warning("Invalid model in %s: must be a non-empty string", yaml_path)
+            return None
 
         return SkillDef(
             name=name,
             description=description,
             prompt_body=prompt_body,
             mode=mode,
-            model=meta.get("model"),
+            model=model.strip() if model else None,
             context=meta.get("context", "full"),
             permission_rules=parse_skill_permissions(meta, str(yaml_path)),
             source_path=prompt_md if prompt_md.is_file() else yaml_path,

@@ -128,6 +128,10 @@ def _validate_meta(meta: dict, source: str = "") -> None:
     if context not in VALID_CONTEXTS:
         raise SkillParseError(f"Invalid context '{context}'{ctx}: must be one of {VALID_CONTEXTS}")
 
+    model = meta.get("model")
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise SkillParseError(f"Invalid model '{model}'{ctx}: must be a non-empty string")
+
     parse_skill_permissions(meta, source)
 
 
@@ -145,7 +149,7 @@ def parse_skill_file(path: Path) -> SkillDef:
         description=meta["description"],
         prompt_body=body,
         mode=meta.get("mode", "inline"),
-        model=meta.get("model"),
+        model=meta["model"].strip() if meta.get("model") else None,
         context=meta.get("context", "full"),
         permission_rules=parse_skill_permissions(meta, str(path)),
         source_path=path,

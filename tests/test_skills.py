@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ from valecode.skills.parser import (
     substitute_arguments,
 )
 from valecode.skills.loader import SkillLoader
+from valecode.skills.executor import SkillExecutor
 from valecode.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,15 @@ class TestParseSkillFile:
         skill = parse_skill_file(f)
         assert skill.mode == "fork"
         assert skill.context == "none"
+
+    def test_model_must_be_a_nonempty_string(self, tmp_path: Path) -> None:
+        f = tmp_path / "bad-model.md"
+        f.write_text(
+            "---\nname: bad-model\ndescription: bad\nmodel: ''\n---\nbody"
+        )
+
+        with pytest.raises(SkillParseError, match="Invalid model"):
+            parse_skill_file(f)
 
     def test_scoped_permission_rules(self, tmp_path: Path) -> None:
         f = tmp_path / "guarded.md"
@@ -386,6 +396,157 @@ class TestLoadSkillTool:
         tool = LoadSkill()
         assert tool.is_system_tool is True
         assert tool.category == "read"
+
+
+class TestSkillExecutor:
+    def test_inline_skill_is_injected_into_main_conversation(self) -> None:
+        from valecode.conversation import ConversationManager
+
+        agent = MagicMock()
+        agent.recovery_state = None
+        conversation = ConversationManager()
+        skill = SkillDef(
+            name="review",
+            description="Review code",
+            prompt_body="Review $ARGUMENTS carefully",
+        )
+        executor = SkillExecutor(agent, MagicMock(), "anthropic")
+
+        prompt = executor.execute_inline(skill, "src/app.py", conversation)
+
+        assert prompt == "Review src/app.py carefully"
+        agent.activate_skill.assert_called_once_with(
+            "review", "Review src/app.py carefully", {}
+        )
+        assert len(conversation.history) == 1
+        assert "# Skill: review" in conversation.history[0].content
+        assert "Review src/app.py carefully" in conversation.history[0].content
+
+    def test_fork_skill_model_uses_current_provider_connection(self) -> None:
+        from valecode.config import ProviderConfig
+
+        agent = MagicMock()
+        agent.context_window = 100
+        agent.provider_name = "default"
+        agent.model = "parent-model"
+        switched_client = MagicMock()
+        provider = ProviderConfig(
+            name="default",
+            protocol="openai-compat",
+            base_url="https://example.invalid/v1",
+            model="parent-model",
+            api_key="secret",
+            context_window=64_000,
+            max_output_tokens=4_096,
+        )
+        executor = SkillExecutor(
+            agent,
+            MagicMock(),
+            "openai-compat",
+            provider_config=provider,
+        )
+        skill = SkillDef(
+            name="review",
+            description="Review code",
+            mode="fork",
+            model="review-model",
+        )
+
+        with patch("valecode.client.create_client", return_value=switched_client) as create:
+            runtime = executor._resolve_fork_runtime(skill)
+
+        assert runtime == (
+            switched_client,
+            "openai-compat",
+            64_000,
+            "skill-review",
+            "review-model",
+        )
+        created_config = create.call_args.args[0]
+        assert created_config.base_url == provider.base_url
+        assert created_config.api_key == "secret"
+        assert created_config.model == "review-model"
+
+    def test_fork_skill_model_without_provider_fails_loudly(self) -> None:
+        agent = MagicMock()
+        agent.context_window = 100
+        agent.provider_name = "default"
+        agent.model = "parent-model"
+        executor = SkillExecutor(agent, MagicMock(), "anthropic")
+        skill = SkillDef(
+            name="review",
+            description="Review code",
+            mode="fork",
+            model="other-model",
+        )
+
+        with pytest.raises(ValueError, match="no Provider configuration"):
+            executor._resolve_fork_runtime(skill)
+
+    @pytest.mark.asyncio
+    async def test_execute_fork_passes_declared_model_to_agent(self) -> None:
+        from valecode.agent import LoopComplete
+        from valecode.config import ProviderConfig
+
+        parent = MagicMock()
+        parent.registry = ToolRegistry()
+        parent.work_dir = "."
+        parent.max_iterations = 3
+        parent.permission_checker = None
+        parent.context_window = 100
+        parent.execution_controller = MagicMock()
+        parent.cancellation_token = MagicMock()
+        parent.provider_name = "default"
+        parent.model = "parent-model"
+        parent.recovery_state = None
+        provider = ProviderConfig(
+            name="default",
+            protocol="openai-compat",
+            base_url="https://example.invalid/v1",
+            model="parent-model",
+            api_key="secret",
+            context_window=32_000,
+        )
+        created: dict = {}
+
+        class ForkAgent:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+
+            def activate_skill(self, *args):
+                created["activated"] = args
+
+            async def run(self, conversation):
+                created["conversation"] = conversation
+                yield LoopComplete(total_turns=1)
+
+        skill = SkillDef(
+            name="review",
+            description="Review code",
+            prompt_body="Review now",
+            mode="fork",
+            context="none",
+            model="review-model",
+        )
+        executor = SkillExecutor(
+            parent,
+            MagicMock(),
+            "openai-compat",
+            provider_config=provider,
+        )
+
+        with (
+            patch("valecode.client.create_client", return_value=MagicMock()),
+            patch("valecode.agent.Agent", ForkAgent),
+        ):
+            result = await executor.execute_fork(skill, "")
+
+        assert result == ""
+        assert created["model"] == "review-model"
+        assert created["provider_name"] == "skill-review"
+        assert created["protocol"] == "openai-compat"
+        assert created["context_window"] == 32_000
+        assert created["activated"] == ("review", "Review now", {})
 
 # ---------------------------------------------------------------------------
 # Agent 集成

@@ -70,7 +70,7 @@ def register_skill_commands(
 
                     asyncio.create_task(_run_fork())
                 else:
-                    exe.execute_inline(skill, ctx.args)
+                    exe.execute_inline(skill, ctx.args, ctx.conversation)
                     ctx.ui.add_system_message(
                         f"skill({name})\nSuccessfully loaded skill"
                     )

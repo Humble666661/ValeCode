@@ -835,6 +835,7 @@ class ValeCodeApp(App):
             agent=self.agent,
             client=self.client,
             protocol=provider.protocol,
+            provider_config=provider,
         )
 
         catalog = self.skill_loader.get_catalog()

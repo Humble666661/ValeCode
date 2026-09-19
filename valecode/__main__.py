@@ -122,6 +122,8 @@ def main() -> None:
                 addr=config.remote.host,
                 port=config.remote.port,
                 auth_token=config.remote.token,
+                enable_fork=config.enable_fork,
+                enable_verification_agent=config.enable_verification_agent,
             )
         except ValueError as e:
             print(f"Remote config error: {e}", file=sys.stderr)

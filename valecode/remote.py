@@ -39,10 +39,16 @@ from valecode.agent import (
     TurnComplete,
     UsageEvent,
 )
+from valecode.agents.durable_task_manager import DurableTaskManager
+from valecode.agents.loader import AgentLoader
+from valecode.agents.notification import format_task_notification
+from valecode.agents.trace import TraceManager
 from valecode.client import create_client, resolve_context_window
 from valecode.commands import CommandContext, CommandRegistry, CommandType
 from valecode.commands.handlers import register_all_commands
 from valecode.commands.handlers.skill_register import register_skill_commands
+from valecode.commands.handlers.tasks import create_tasks_command
+from valecode.commands.handlers.trace import create_trace_command
 from valecode.commands.parser import parse_command
 from valecode.config import MCPServerConfig, ProviderConfig, SandboxAppConfig
 from valecode.conversation import ConversationManager
@@ -61,6 +67,7 @@ from valecode.skills.loader import SkillLoader
 from valecode.skills.executor import SkillExecutor
 from valecode.tools import ToolRegistry, ToolSource, create_default_registry
 from valecode.tools.impl.tool_search import ToolSearchTool
+from valecode.tools.agent_tool import AgentTool
 from valecode.tools.install_skill import InstallSkillTool
 from valecode.tools.load_skill import LoadSkill
 from valecode.web_content import INDEX_HTML
@@ -91,6 +98,8 @@ class RemoteServer:
         port: int = 18888,
         sandbox_config: SandboxAppConfig | None = None,
         auth_token: str = "",
+        enable_fork: bool = False,
+        enable_verification_agent: bool = False,
     ) -> None:
         if not _is_loopback_bind(addr) and not auth_token:
             raise ValueError(
@@ -103,6 +112,8 @@ class RemoteServer:
         self.port = port
         self.auth_token = auth_token
         self._sandbox_config = sandbox_config or SandboxAppConfig()
+        self._enable_fork = enable_fork
+        self._enable_verification_agent = enable_verification_agent
 
         # WebSocket 连接池（支持多客户端广播）
         self._connections: set[ServerConnection] = set()
@@ -114,6 +125,7 @@ class RemoteServer:
         self.session_id: str = ""
         self._streaming = False
         self._cancel_event: asyncio.Event | None = None
+        self._notification_task: asyncio.Task[None] | None = None
 
         # 权限请求的 pending 队列：id -> Future
         self._pending_perms: dict[str, asyncio.Future[PermissionResponse]] = {}
@@ -131,6 +143,11 @@ class RemoteServer:
         self.skill_executor: SkillExecutor | None = None
         self._install_skill_tool: InstallSkillTool | None = None
 
+        # 子 Agent / 后台任务
+        self.agent_loader: AgentLoader | None = None
+        self.task_manager: DurableTaskManager | None = None
+        self.trace_manager = TraceManager()
+
         # Memory / Session
         self.memory_manager: MemoryManager | None = None
         self.session_manager: SessionManager | None = None
@@ -145,6 +162,9 @@ class RemoteServer:
         try:
             self._init_agent()
             await self._init_mcp()
+            self._notification_task = asyncio.create_task(
+                self._start_notification_polling()
+            )
 
             display_host = "localhost" if _is_loopback_bind(self.addr) else self.addr
             try:
@@ -170,6 +190,12 @@ class RemoteServer:
 
     async def _shutdown(self) -> None:
         """Release remote runtime resources even on startup failure/cancellation."""
+        if self._notification_task is not None:
+            self._notification_task.cancel()
+            await asyncio.gather(self._notification_task, return_exceptions=True)
+            self._notification_task = None
+        if self.task_manager is not None:
+            await self.task_manager.shutdown()
         if self.mcp_manager is not None:
             try:
                 await self.mcp_manager.shutdown()
@@ -381,6 +407,54 @@ class RemoteServer:
         self.registry.register(todo_tool)
         self.agent.set_todo_state_provider(todo_tool.current_summary)
 
+        # 子 Agent 与持久化后台任务。Remote 暂不开放 Team/Worktree 隔离，
+        # 普通定义型子 Agent 及可选的会话 fork 与 CLI/TUI 共用同一实现。
+        self.task_manager = DurableTaskManager(self.session_manager.task_store)
+        self.agent_loader = AgentLoader(
+            work_dir,
+            enable_verification=self._enable_verification_agent,
+        )
+        self.agent_loader.load_all()
+        self.registry.register(AgentTool(
+            agent_loader=self.agent_loader,
+            task_manager=self.task_manager,
+            trace_manager=self.trace_manager,
+            parent_agent=self.agent,
+            enable_fork=self._enable_fork,
+            provider_config=provider,
+        ))
+
+        agent_catalog = self.agent_loader.list_agents()
+        if agent_catalog:
+            lines = [
+                "## Available Sub-Agent Types",
+                "",
+                "Use the Agent tool with subagent_type to delegate a task:",
+                "",
+            ]
+            lines.extend(
+                f"- **{agent_type}**: {when_to_use}"
+                for agent_type, when_to_use in agent_catalog
+            )
+            if self._enable_fork:
+                lines.extend([
+                    "",
+                    "Leave subagent_type empty to fork the current conversation.",
+                ])
+            lines.extend([
+                "",
+                "Background task results are delivered automatically. "
+                "Do not wait, sleep, or poll after receiving a task ID.",
+            ])
+            self.agent.set_agent_catalog(
+                "\n".join(lines), catalog_list=agent_catalog
+            )
+
+        self.command_registry.register_sync(create_tasks_command(self.task_manager))
+        self.command_registry.register_sync(
+            create_trace_command(self.trace_manager, self.agent.agent_id)
+        )
+
         # 连接 Skill 到 Agent
         load_skill_tool.set_loader(self.skill_loader)
         load_skill_tool.set_agent(self.agent)
@@ -428,6 +502,49 @@ class RemoteServer:
         self.conversation = ConversationManager()
 
         log.info("Agent initialized: session=%s, model=%s", self.session_id, provider.model)
+
+    async def _process_task_notifications(self) -> None:
+        """Deliver completed background work and let the lead Agent summarize it."""
+        if (
+            self._streaming
+            or not self._connections
+            or self.task_manager is None
+            or self.agent is None
+        ):
+            return
+
+        completed = self.task_manager.poll_completed()
+        if not completed:
+            return
+
+        for task in completed:
+            status_icon = "✓" if task.status == "completed" else "✗"
+            await self._broadcast({
+                "type": "system",
+                "data": {
+                    "message": (
+                        f"{status_icon} 后台任务完成: "
+                        f"[{task.id}] {task.name} — {task.status}"
+                    )
+                },
+            })
+
+        notification_prompt = "\n\n".join(
+            format_task_notification(task) for task in completed
+        )
+        await self._handle_user_message(
+            notification_prompt,
+            dispatch_commands=False,
+        )
+
+    async def _start_notification_polling(self) -> None:
+        """Poll durable task completions without blocking WebSocket handling."""
+        try:
+            while True:
+                await asyncio.sleep(1)
+                await self._process_task_notifications()
+        except asyncio.CancelledError:
+            return
 
     # ------------------------------------------------------------------
     # MCP 初始化

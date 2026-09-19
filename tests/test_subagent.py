@@ -641,6 +641,24 @@ class TestTaskManager:
         assert bg.status == "cancelled"
 
     @pytest.mark.asyncio
+    async def test_shutdown_cancels_and_awaits_running_tasks(self, mock_agent):
+        started = asyncio.Event()
+
+        async def long_running(*a, **kw):
+            started.set()
+            await asyncio.Event().wait()
+
+        mock_agent.run_to_completion = long_running
+        tm = TaskManager()
+        task_id = tm.launch(mock_agent, "long task")
+        await started.wait()
+
+        await tm.shutdown()
+
+        assert tm.get(task_id).status == "cancelled"
+        assert tm._async_tasks == {}
+
+    @pytest.mark.asyncio
     async def test_failed_task(self):
         agent = MagicMock()
         agent.total_input_tokens = 0

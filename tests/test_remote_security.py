@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -111,3 +112,78 @@ async def test_remote_shutdown_releases_resources_after_startup_error() -> None:
     server.registry.release_session.assert_awaited_once()
     server.hook_engine.shutdown.assert_awaited_once()
     server.session.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_remote_registers_subagents_tasks_and_trace_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from valecode.agents.durable_task_manager import DurableTaskManager
+    from valecode.config import ProviderConfig
+    from valecode.tools.agent_tool import AgentTool
+
+    monkeypatch.chdir(tmp_path)
+    provider = ProviderConfig(
+        name="offline",
+        protocol="anthropic",
+        base_url="https://example.invalid",
+        model="offline",
+        api_key="not-used",
+    )
+    with patch("valecode.remote.create_client", return_value=MagicMock()):
+        server = RemoteServer(
+            [provider],
+            enable_fork=True,
+            enable_verification_agent=True,
+        )
+        server._init_agent()
+
+    assert isinstance(server.registry.get("Agent"), AgentTool)
+    assert isinstance(server.task_manager, DurableTaskManager)
+    assert server.agent_loader.get("Verification") is not None
+    assert server.command_registry.find("tasks") is not None
+    assert server.command_registry.find("trace") is not None
+    assert "Leave subagent_type empty" in server.agent._agent_catalog
+    await server._shutdown()
+
+
+@pytest.mark.asyncio
+async def test_remote_delivers_completed_background_task_to_lead() -> None:
+    from valecode.agents.task_manager import BackgroundTask
+
+    server = RemoteServer([])
+    server.agent = MagicMock()
+    server.task_manager = MagicMock()
+    completed = BackgroundTask(
+        id="task-1",
+        name="Explore",
+        agent=MagicMock(),
+        task="inspect project",
+        status="completed",
+        result="found the implementation",
+    )
+    server.task_manager.poll_completed.return_value = [completed]
+    server._connections.add(MagicMock())
+    server._broadcast = AsyncMock()
+    server._handle_user_message = AsyncMock()
+
+    await server._process_task_notifications()
+
+    server._broadcast.assert_awaited_once()
+    prompt = server._handle_user_message.await_args.args[0]
+    assert "<task-notification>" in prompt
+    assert "found the implementation" in prompt
+    server._handle_user_message.assert_awaited_once_with(
+        prompt, dispatch_commands=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_keeps_completed_tasks_queued_without_clients() -> None:
+    server = RemoteServer([])
+    server.agent = MagicMock()
+    server.task_manager = MagicMock()
+
+    await server._process_task_notifications()
+
+    server.task_manager.poll_completed.assert_not_called()

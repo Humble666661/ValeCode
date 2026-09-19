@@ -201,3 +201,11 @@ class TaskManager:
             except asyncio.QueueEmpty:
                 break
         return completed
+
+    async def shutdown(self) -> None:
+        """Cancel and await every process-local background task."""
+        handles = [task for task in self._async_tasks.values() if not task.done()]
+        for task in handles:
+            task.cancel()
+        if handles:
+            await asyncio.gather(*handles, return_exceptions=True)

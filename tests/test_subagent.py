@@ -267,6 +267,74 @@ class TestAgentLoader:
         assert "good" in agents
         assert "bad" not in agents
 
+    def test_registered_plugin_source_is_loaded_at_lowest_priority(self, tmp_path: Path):
+        plugin_dir = tmp_path / "plugin-agents"
+        plugin_dir.mkdir()
+        (plugin_dir / "agents.md").write_text(
+            make_agent_md(name="plugin-agent", description="From plugin")
+        )
+        (plugin_dir / "explore.md").write_text(
+            make_agent_md(name="Explore", description="Must not override builtin")
+        )
+
+        loader = AgentLoader(str(tmp_path), plugin_entry_points=[])
+        loader.register_plugin_source(plugin_dir)
+        agents = loader.load_all()
+
+        assert agents["plugin-agent"].source == "plugin:plugin-agents"
+        assert agents["Explore"].source == "builtin"
+
+    def test_agent_entry_points_are_deterministic_and_fail_open(self, tmp_path: Path):
+        first_dir = tmp_path / "first"
+        second_dir = tmp_path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        (first_dir / "shared.md").write_text(
+            make_agent_md(name="shared", description="First entry point wins")
+        )
+        (second_dir / "shared.md").write_text(
+            make_agent_md(name="shared", description="Second entry point")
+        )
+        (second_dir / "unique.md").write_text(
+            make_agent_md(name="unique", description="Second source")
+        )
+
+        class EntryPoint:
+            def __init__(self, name, value, loaded, error=None):
+                self.name = name
+                self.value = value
+                self.module = "test_plugin"
+                self._loaded = loaded
+                self._error = error
+
+            def load(self):
+                if self._error is not None:
+                    raise self._error
+                return self._loaded
+
+        loader = AgentLoader(
+            str(tmp_path),
+            plugin_entry_points=[
+                EntryPoint("z-second", "demo:second", lambda: [second_dir]),
+                EntryPoint("broken", "demo:broken", None, RuntimeError("boom")),
+                EntryPoint("a-first", "demo:first", first_dir),
+            ],
+        )
+        agents = loader.load_all()
+
+        assert agents["shared"].when_to_use == "First entry point wins"
+        assert agents["shared"].source == "plugin:test_plugin:a-first"
+        assert agents["unique"].source == "plugin:test_plugin:z-second"
+        assert len(loader.plugin_issues) == 1
+        assert loader.plugin_issues[0].entry_point == "broken (demo:broken)"
+        assert "RuntimeError: boom" in loader.plugin_issues[0].error
+
+    def test_invalid_plugin_source_is_rejected(self, tmp_path: Path):
+        loader = AgentLoader(str(tmp_path), plugin_entry_points=[])
+
+        with pytest.raises(ValueError, match="does not exist"):
+            loader.register_plugin_source(tmp_path / "missing")
+
 # =====================================================================
 # 3. 工具过滤
 # =====================================================================

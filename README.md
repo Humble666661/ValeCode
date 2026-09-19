@@ -191,6 +191,18 @@ Hooks、超时和输出预算路径；退出时会调用工具的 `close()`。�
 相同的系统权限，因此只应安装和启用可信插件；需要进程隔离的外部工具应优先使用
 MCP。延迟工具可以通过 `search_terms = ("alias", "中文别名")` 声明额外检索词。
 
+同一插件包也可以通过 `valecode.agents` entry-point 提供包含 Markdown Agent 定义
+的目录。入口值可以是目录路径，或返回一个/多个目录路径的同步工厂：
+
+```toml
+[project.entry-points."valecode.agents"]
+my_agents = "my_valecode_plugin:agent_directories"
+```
+
+插件 Agent 沿用 `.valecode/agents/*.md` 的格式，优先级低于项目、用户和内置 Agent；
+不同插件按 entry-point 名称确定性加载，单个插件失败不会阻止其他插件启动。Agent
+插件同样在当前进程中加载，仅应安装可信包。
+
 ## 恢复与副作用语义
 
 ValeCode 在启动时扫描遗留 Run，并将未完成状态收敛为可恢复状态：

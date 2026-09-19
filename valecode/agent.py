@@ -563,6 +563,62 @@ class Agent:
     def _infer_file_path(self, args: dict) -> str:
         return str(args.get("file_path", args.get("path", "")))
 
+    async def _run_error_hook(self, error: BaseException) -> None:
+        """Dispatch an error hook without ever replacing the original failure."""
+        if not self.hook_engine:
+            return
+        try:
+            message = f"{type(error).__name__}: {error}"
+            await self.hook_engine.run_hooks(
+                "error",
+                self._build_hook_context("error", message=message, error=message),
+            )
+        except Exception:
+            log.exception("Error hook dispatch failed")
+
+    async def _run_permission_request_hook(
+        self, tc: ToolCallComplete, description: str,
+    ) -> None:
+        if not self.hook_engine:
+            return
+        await self.hook_engine.run_hooks(
+            "permission_request",
+            self._build_hook_context(
+                "permission_request",
+                tool_name=tc.tool_name,
+                tool_args=tc.arguments,
+                file_path=self._infer_file_path(tc.arguments),
+                message=description,
+                tool_call_id=self._control_tool_ids.get(tc.tool_id, tc.tool_id),
+            ),
+        )
+
+    async def _run_tool_lifecycle_hooks(
+        self, tc: ToolCallComplete, result: ToolResult,
+    ) -> None:
+        """Dispatch semantic hooks only after a tool was actually invoked."""
+        if not self.hook_engine:
+            return
+        event = ""
+        if tc.tool_name in {"WriteFile", "EditFile"} and not result.is_error:
+            event = "file_change"
+        elif tc.tool_name == "Bash":
+            event = "command_execute"
+        if not event:
+            return
+        await self.hook_engine.run_hooks(
+            event,
+            self._build_hook_context(
+                event,
+                tool_name=tc.tool_name,
+                tool_args=tc.arguments,
+                file_path=self._infer_file_path(tc.arguments),
+                message=result.output,
+                error=result.output if result.is_error else "",
+                tool_call_id=self._control_tool_ids.get(tc.tool_id, tc.tool_id),
+            ),
+        )
+
     def _drain_hook_events(self) -> list[HookEvent]:
         if not self.hook_engine:
             return []
@@ -1194,6 +1250,20 @@ class Agent:
                 transcript_path=self._transcript_path,
                 cleanup_callback=self._cleanup_result_artifacts,
             )
+            if isinstance(result, CompactEvent) and self.hook_engine:
+                await self.hook_engine.run_hooks(
+                    "compact",
+                    self._build_hook_context(
+                        "compact",
+                        message=(
+                            f"Compacted context from {result.before_tokens} tokens"
+                        ),
+                        tool_args={
+                            "before_tokens": result.before_tokens,
+                            "manual": manual,
+                        },
+                    ),
+                )
             span.set_attributes(
                 {
                     "compact.duration_ms": round(
@@ -1250,6 +1320,7 @@ class Agent:
         except Exception as exc:
             run_status = "failed"
             message = f"{type(exc).__name__}: {exc}"
+            await self._run_error_hook(exc)
             self._finish_control_step(StepStatus.FAILED, error=message)
             self._finish_control_run(RunStatus.FAILED, error=message)
             raise
@@ -1976,6 +2047,7 @@ class Agent:
                 loop = asyncio.get_running_loop()
                 future: asyncio.Future[PermissionResponse] = loop.create_future()
                 desc = self._build_permission_description(tc)
+                await self._run_permission_request_hook(tc, desc)
                 self._finish_control_step(
                     StepStatus.BLOCKED,
                     event_payload={
@@ -2025,8 +2097,10 @@ class Agent:
                     permission_name = tool.permission_name
                     self.permission_checker.add_session_allow(permission_name, tc.arguments)
 
+        tool_started = False
         try:
             params = tool.params_model.model_validate(tc.arguments)
+            tool_started = True
             result = await self._execute_registered_tool(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(
@@ -2036,6 +2110,9 @@ class Agent:
             result = ToolResult(
                 output=f"Tool execution error: {e}", is_error=True
             )
+
+        if tool_started:
+            await self._run_tool_lifecycle_hooks(tc, result)
 
         self._snapshot_for_recovery(tc, result)
 
@@ -2161,6 +2238,7 @@ class Agent:
         except Exception as exc:
             run_status = "failed"
             message = f"{type(exc).__name__}: {exc}"
+            await self._run_error_hook(exc)
             self._finish_control_step(StepStatus.FAILED, error=message)
             self._finish_control_run(RunStatus.FAILED, error=message)
             raise
@@ -2491,6 +2569,9 @@ class Agent:
                     is_error=True,
                 )
             if decision.effect == "ask":
+                await self._run_permission_request_hook(
+                    tc, self._build_permission_description(tc)
+                )
                 if self.permission_mode == PermissionMode.BYPASS:
                     pass  # BYPASS 模式自动批准
                 else:
@@ -2499,8 +2580,10 @@ class Agent:
                         is_error=True,
                     )
 
+        tool_started = False
         try:
             params = tool.params_model.model_validate(tc.arguments)
+            tool_started = True
             result = await self._execute_registered_tool(tc.tool_name, params)
         except ValidationError as e:
             result = ToolResult(
@@ -2510,6 +2593,9 @@ class Agent:
             result = ToolResult(
                 output=f"Tool execution error: {e}", is_error=True
             )
+
+        if tool_started:
+            await self._run_tool_lifecycle_hooks(tc, result)
 
         if self.hook_engine:
             file_path = self._infer_file_path(tc.arguments)

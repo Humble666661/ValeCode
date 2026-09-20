@@ -908,6 +908,7 @@ class ValeCodeApp(App):
         from valecode.teams.manager import TeamManager
         from valecode.tools.team_create import TeamCreateTool
         from valecode.tools.team_delete import TeamDeleteTool
+        from valecode.tools.lead_tasks import build_lead_task_tools
 
         self.team_manager = TeamManager(
             worktree_manager=self.worktree_manager,
@@ -941,6 +942,10 @@ class ValeCodeApp(App):
             parent_agent=self.agent,
         )
         self.registry.register(team_delete_tool)
+        for task_tool in build_lead_task_tools(
+            self.team_manager, self.agent.agent_id
+        ):
+            self.registry.register(task_tool)
 
         agent_catalog = self.agent_loader.list_agents()
         if agent_catalog:

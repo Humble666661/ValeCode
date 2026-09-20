@@ -116,6 +116,11 @@ class Mailbox:
                     pass
                 sleep_ms = 5 + random.randint(0, 95)  # 5–100ms
                 time.sleep(sleep_ms / 1000)
+            except PermissionError:
+                # Windows can surface lock-file contention as EACCES while
+                # another process owns or is unlinking the file.
+                sleep_ms = 5 + random.randint(0, 95)
+                time.sleep(sleep_ms / 1000)
             except OSError as e:
                 last_err = e
                 break

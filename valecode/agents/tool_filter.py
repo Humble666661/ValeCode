@@ -18,6 +18,10 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "TaskStop",
     "Workflow",
     "TodoWrite",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskUpdate",
 })
 
 CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
@@ -176,6 +180,9 @@ def build_teammate_tools(
                 for name, tool in filtered.items()
                 if name in allowed_set
             }
+
+    for name in TEAMMATE_COORDINATION_TOOLS:
+        filtered.pop(name, None)
 
     coordination_tools = [
         TaskCreateTool(team_manager, team_name, agent_name),

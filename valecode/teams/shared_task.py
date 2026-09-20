@@ -192,6 +192,10 @@ class SharedTaskStore:
                 except OSError:
                     pass
                 time.sleep((5 + random.randint(0, 45)) / 1000)
+            except PermissionError:
+                # Windows may report EACCES instead of EEXIST while another
+                # process owns or is removing the lock file.
+                time.sleep((5 + random.randint(0, 45)) / 1000)
             except OSError as exc:
                 last_error = exc
                 break

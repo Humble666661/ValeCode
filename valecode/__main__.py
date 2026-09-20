@@ -246,6 +246,7 @@ async def _run_prompt(
     from valecode.teams.models import BackendType
     from valecode.tools.team_create import TeamCreateTool
     from valecode.tools.team_delete import TeamDeleteTool
+    from valecode.tools.lead_tasks import build_lead_task_tools
     from valecode.worktree import WorktreeManager
     from valecode.config import WorktreeConfig
 
@@ -382,6 +383,8 @@ async def _run_prompt(
         enable_coordinator_mode=config.enable_coordinator_mode,
     ))
     registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
+    for task_tool in build_lead_task_tools(team_manager, agent.agent_id):
+        registry.register(task_tool)
 
     def drain_notifications() -> list[str]:
         notes: list[str] = []

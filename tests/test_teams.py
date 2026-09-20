@@ -43,6 +43,14 @@ from valecode.teams.coordinator import (
     match_session_mode,
 )
 from valecode.tools.task_update import TaskUpdateParams, TaskUpdateTool
+from valecode.tools.lead_tasks import (
+    LeadTaskCreateParams,
+    LeadTaskCreateTool,
+    LeadTaskListParams,
+    LeadTaskListTool,
+    LeadTaskUpdateParams,
+    LeadTaskUpdateTool,
+)
 from valecode.agents.tool_filter import (
     COORDINATOR_MODE_ALLOWED_TOOLS,
     IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
@@ -378,6 +386,58 @@ class TestSharedTaskStore:
         )
         assert claimed.is_error is False
         assert store.get(task.id).assignee == "alice"
+
+    @pytest.mark.asyncio
+    async def test_lead_can_manage_but_not_claim_team_tasks(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        manager = MagicMock()
+        manager.get_team.return_value = AgentTeam(
+            name="alpha", lead_agent_id="lead-1"
+        )
+        manager.get_task_store.return_value = store
+
+        created = await LeadTaskCreateTool(manager, "lead-1").execute(
+            LeadTaskCreateParams(team_name="alpha", title="Implement")
+        )
+        assert created.is_error is False
+
+        assigned = await LeadTaskUpdateTool(manager, "lead-1").execute(
+            LeadTaskUpdateParams(
+                team_name="alpha", task_id="1", assignee="worker"
+            )
+        )
+        assert assigned.is_error is False
+        assert store.get("1").assignee == "worker"
+
+        listed = await LeadTaskListTool(manager, "lead-1").execute(
+            LeadTaskListParams(team_name="alpha")
+        )
+        assert "Implement" in listed.output
+
+        denied = await LeadTaskUpdateTool(manager, "lead-1").execute(
+            LeadTaskUpdateParams(
+                team_name="alpha", task_id="1", status="in_progress"
+            )
+        )
+        assert denied.is_error is True
+        assert "only the teammate" in denied.output
+
+    @pytest.mark.asyncio
+    async def test_lead_task_tools_reject_other_teams(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        manager = MagicMock()
+        manager.get_team.return_value = AgentTeam(
+            name="alpha", lead_agent_id="someone-else"
+        )
+        manager.get_task_store.return_value = store
+
+        result = await LeadTaskListTool(manager, "lead-1").execute(
+            LeadTaskListParams(team_name="alpha")
+        )
+        assert result.is_error is True
+        assert "not the lead" in result.output
 
 # =====================================================================
 # 3. Mailbox

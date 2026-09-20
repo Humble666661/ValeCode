@@ -342,7 +342,15 @@ class TestAgentLoader:
 class TestToolFilter:
 
     def test_global_disallowed(self):
-        reg = make_registry("ReadFile", "Agent", "Bash", "AskUserQuestion", "TodoWrite")
+        reg = make_registry(
+            "ReadFile",
+            "Agent",
+            "Bash",
+            "AskUserQuestion",
+            "TodoWrite",
+            "TaskCreate",
+            "TaskList",
+        )
         definition = AgentDef(
             agent_type="test", when_to_use="test", source="builtin"
         )
@@ -351,6 +359,8 @@ class TestToolFilter:
         assert "Agent" not in names
         assert "AskUserQuestion" not in names
         assert "TodoWrite" not in names
+        assert "TaskCreate" not in names
+        assert "TaskList" not in names
         assert "ReadFile" in names
         assert "Bash" in names
 

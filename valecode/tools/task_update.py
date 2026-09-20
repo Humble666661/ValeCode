@@ -27,16 +27,24 @@ class TaskUpdateTool(Tool):
     name = "TaskUpdate"
     description = (
         "Update a shared task's status, assignee, description, or dependencies. "
-        "Use add_blocks/add_blocked_by to add dependency relations."
+        "Setting status=in_progress atomically claims a dependency-ready task "
+        "for the current teammate. Use add_blocks/add_blocked_by to add "
+        "dependency relations."
     )
     params_model = TaskUpdateParams
     category = "command"
     is_concurrency_safe = True
 
 
-    def __init__(self, team_manager: TeamManager, team_name: str) -> None:
+    def __init__(
+        self,
+        team_manager: TeamManager,
+        team_name: str,
+        agent_name: str = "",
+    ) -> None:
         self._team_manager = team_manager
         self._team_name = team_name
+        self._agent_name = agent_name
 
 
     async def execute(self, params: BaseModel) -> ToolResult:
@@ -52,14 +60,41 @@ class TaskUpdateTool(Tool):
         if store is None:
             return ToolResult(output=f"Task store not found for team '{self._team_name}'", is_error=True)
 
-        task = store.update(
-            task_id=p.task_id,
-            status=p.status,
-            assignee=p.assignee,
-            description=p.description,
-            add_blocks=p.add_blocks,
-            add_blocked_by=p.add_blocked_by,
-        )
+        try:
+            if p.status == "in_progress":
+                if not self._agent_name:
+                    return ToolResult(
+                        output="Current teammate identity is unavailable; task claim denied",
+                        is_error=True,
+                    )
+                if p.assignee is not None and p.assignee != self._agent_name:
+                    return ToolResult(
+                        output=(
+                            "A teammate can only claim a task for itself; "
+                            f"current teammate is '{self._agent_name}'"
+                        ),
+                        is_error=True,
+                    )
+                if p.description is not None or p.add_blocks or p.add_blocked_by:
+                    return ToolResult(
+                        output=(
+                            "Claim the task first, then update its description or "
+                            "dependencies in a separate TaskUpdate call"
+                        ),
+                        is_error=True,
+                    )
+                task = store.claim(p.task_id, self._agent_name)
+            else:
+                task = store.update(
+                    task_id=p.task_id,
+                    status=p.status,
+                    assignee=p.assignee,
+                    description=p.description,
+                    add_blocks=p.add_blocks,
+                    add_blocked_by=p.add_blocked_by,
+                )
+        except (KeyError, TimeoutError, ValueError) as exc:
+            return ToolResult(output=str(exc), is_error=True)
 
         if task is None:
             return ToolResult(output=f"Task '{p.task_id}' not found", is_error=True)

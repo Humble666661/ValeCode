@@ -378,6 +378,96 @@ class TaskStore:
             ).fetchone()
         return self._from_row(updated)
 
+    def claim_board_task(self, task_id: str, assignee: str) -> TaskState:
+        """Atomically transition one ready shared-board task to in-progress.
+
+        Board claims deliberately do not use worker leases or attempts: a teammate
+        owns the human-visible board item, while the durable worker state machine
+        remains reserved for executable background tasks.
+        """
+        if not assignee.strip():
+            raise ValueError("A non-empty assignee is required to claim a task")
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            metadata = load_json(row["metadata_json"], {})
+            if metadata.get("kind") != "shared_team_task":
+                raise ValueError("Only shared team tasks can be claimed this way")
+            data = load_json(row["input_json"], {})
+            board_status = str(data.get("board_status", "pending"))
+            current_assignee = str(data.get("assignee", ""))
+            if board_status == "in_progress":
+                if current_assignee == assignee:
+                    return self._from_row(row)
+                raise ValueError(
+                    f"Task '{task_id}' is already claimed by "
+                    f"'{current_assignee or 'unknown'}'"
+                )
+            if board_status == "completed":
+                raise ValueError(f"Task '{task_id}' is already completed")
+            if board_status not in {"pending", "blocked"}:
+                raise ValueError(
+                    f"Task '{task_id}' cannot be claimed from status "
+                    f"'{board_status}'"
+                )
+            if current_assignee and current_assignee != assignee:
+                raise ValueError(
+                    f"Task '{task_id}' is assigned to '{current_assignee}'"
+                )
+            blocked_rows = connection.execute(
+                """
+                SELECT dependency.id
+                FROM task_dependencies d
+                JOIN tasks dependency ON dependency.id = d.depends_on_task_id
+                WHERE d.task_id = ? AND dependency.status != 'succeeded'
+                ORDER BY dependency.created_at ASC
+                """,
+                (task_id,),
+            ).fetchall()
+            if blocked_rows:
+                display_ids = []
+                for dependency in blocked_rows:
+                    dependency_row = connection.execute(
+                        "SELECT metadata_json FROM tasks WHERE id = ?",
+                        (dependency["id"],),
+                    ).fetchone()
+                    dependency_metadata = load_json(
+                        dependency_row["metadata_json"], {}
+                    )
+                    display_ids.append(
+                        str(dependency_metadata.get("shared_id", dependency["id"]))
+                    )
+                raise ValueError(
+                    f"Task '{task_id}' is blocked by incomplete tasks: "
+                    f"{', '.join(display_ids)}"
+                )
+            data["assignee"] = assignee
+            data["board_status"] = "in_progress"
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE tasks SET status = 'running', input_json = ?,
+                    updated_at = ?, completed_at = NULL, version = version + 1
+                WHERE id = ?
+                """,
+                (dump_json(data), now, task_id),
+            )
+            self.events._append(
+                connection,
+                "task.board_claimed",
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                task_id=task_id,
+                payload={"assignee": assignee, "from": board_status},
+            )
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return self._from_row(updated)
+
     def dependencies_ready(self, task_id: str) -> bool:
         with self.database.reader() as connection:
             row = connection.execute(

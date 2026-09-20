@@ -22,7 +22,11 @@ from valecode.teams.models import (
     resolve_team_dir,
     unique_team_name,
 )
-from valecode.teams.shared_task import SharedTask, SharedTaskStore
+from valecode.teams.shared_task import (
+    SharedTask,
+    SharedTaskClaimError,
+    SharedTaskStore,
+)
 from valecode.teams.mailbox import (
     Mailbox,
     MailboxDataError,
@@ -38,6 +42,7 @@ from valecode.teams.coordinator import (
     is_coordinator_mode,
     match_session_mode,
 )
+from valecode.tools.task_update import TaskUpdateParams, TaskUpdateTool
 from valecode.agents.tool_filter import (
     COORDINATOR_MODE_ALLOWED_TOOLS,
     IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
@@ -287,6 +292,66 @@ class TestSharedTaskStore:
         tasks = store2.list_tasks()
         assert len(tasks) == 1
         assert tasks[0].title == "Persisted task"
+
+    def test_claim_requires_completed_dependencies(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        prerequisite = store.create(title="Design")
+        implementation = store.create(
+            title="Implement", blocked_by=[prerequisite.id]
+        )
+
+        with pytest.raises(SharedTaskClaimError, match="blocked by incomplete"):
+            store.claim(implementation.id, "alice")
+
+        store.update(prerequisite.id, status="completed")
+        claimed = store.claim(implementation.id, "alice")
+        assert claimed.status == "in_progress"
+        assert claimed.assignee == "alice"
+        assert store.claim(implementation.id, "alice").assignee == "alice"
+
+    def test_concurrent_claim_has_exactly_one_owner(self, tmp_dir):
+        path = Path(tmp_dir) / "tasks.json"
+        store = SharedTaskStore(path)
+        store.init_empty()
+        task = store.create(title="Only once")
+
+        def attempt(index: int) -> str | None:
+            try:
+                return SharedTaskStore(path).claim(task.id, f"worker-{index}").assignee
+            except SharedTaskClaimError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            winners = [result for result in pool.map(attempt, range(12)) if result]
+
+        assert len(winners) == 1
+        persisted = SharedTaskStore(path).get(task.id)
+        assert persisted is not None
+        assert persisted.assignee == winners[0]
+
+    @pytest.mark.asyncio
+    async def test_task_update_claims_only_for_current_teammate(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        task = store.create(title="Claim me")
+        manager = MagicMock()
+        manager.get_task_store.return_value = store
+        tool = TaskUpdateTool(manager, "alpha", "alice")
+
+        denied = await tool.execute(
+            TaskUpdateParams(
+                task_id=task.id, status="in_progress", assignee="bob"
+            )
+        )
+        assert denied.is_error is True
+        assert "only claim a task for itself" in denied.output
+
+        claimed = await tool.execute(
+            TaskUpdateParams(task_id=task.id, status="in_progress")
+        )
+        assert claimed.is_error is False
+        assert store.get(task.id).assignee == "alice"
 
 # =====================================================================
 # 3. Mailbox

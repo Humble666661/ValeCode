@@ -569,3 +569,22 @@ def test_team_task_board_uses_sqlite_and_dependency_relations(tmp_path):
     assert updated.status == "completed"
     assert board.get(second.id).blocked_by == [first.id]
     assert sessions.task_store.dependencies_ready(f"shared:alpha:{second.id}") is True
+
+
+def test_durable_team_task_claim_is_atomic_and_dependency_aware(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    prerequisite = board.create("Design")
+    implementation = board.create("Implement", blocked_by=[prerequisite.id])
+
+    with pytest.raises(ValueError, match="blocked by incomplete"):
+        board.claim(implementation.id, "alice")
+
+    board.update(prerequisite.id, status="completed")
+    claimed = board.claim(implementation.id, "alice")
+    assert claimed.status == "in_progress"
+    assert claimed.assignee == "alice"
+    assert board.claim(implementation.id, "alice").assignee == "alice"
+
+    with pytest.raises(ValueError, match="already claimed by 'alice'"):
+        board.claim(implementation.id, "bob")

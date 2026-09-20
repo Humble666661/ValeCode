@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
+import random
+import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from valecode.persistence import TaskState, TaskStore
+
+
+class SharedTaskLockTimeout(TimeoutError):
+    """Raised instead of mutating a task board without owning its lock."""
+
+
+class SharedTaskClaimError(ValueError):
+    """Raised when a shared task cannot safely be claimed."""
+
+
+TASK_BOARD_LOCK_ATTEMPTS = 50
 
 
 @dataclass
@@ -33,16 +48,24 @@ class SharedTaskStore:
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
+        self._lock_path = self._path.with_name(f"{self._path.name}.lock")
         self._next_id = 1
         self._tasks: dict[str, SharedTask] = {}
         self._load()
 
     def _load(self) -> None:
         if not self._path.exists():
+            self._next_id = 1
+            self._tasks = {}
             return
         data = json.loads(self._path.read_text(encoding="utf-8"))
-        self._next_id = data.get("next_id", 1)
+        if not isinstance(data, dict) or not isinstance(data.get("tasks", []), list):
+            raise ValueError("Corrupt shared task board")
+        self._next_id = int(data.get("next_id", 1))
+        self._tasks = {}
         for t in data.get("tasks", []):
+            if not isinstance(t, dict):
+                raise ValueError("Corrupt shared task board")
             task = SharedTask.from_dict(t)
             self._tasks[task.id] = task
 
@@ -52,7 +75,110 @@ class SharedTaskStore:
             "next_id": self._next_id,
             "tasks": [t.to_dict() for t in self._tasks.values()],
         }
-        self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path = self._path.with_name(
+            f".{self._path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with temp_path.open("x", encoding="utf-8", newline="\n") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self._path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def _mutate(self, fn: Callable[[], Any]) -> Any:
+        """Reload and mutate the board while holding a bounded file lock."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        owner_token = uuid.uuid4().hex
+        last_error: OSError | None = None
+        for _ in range(TASK_BOARD_LOCK_ATTEMPTS):
+            try:
+                fd = os.open(
+                    str(self._lock_path),
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o644,
+                )
+                try:
+                    os.write(fd, owner_token.encode("ascii"))
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                break
+            except FileExistsError:
+                try:
+                    info = self._lock_path.stat()
+                    if time.time() - info.st_mtime > 10:
+                        stale_token = self._lock_path.read_text(
+                            encoding="ascii", errors="replace"
+                        )
+                        latest = self._lock_path.stat()
+                        if (
+                            latest.st_mtime_ns == info.st_mtime_ns
+                            and self._lock_path.read_text(
+                                encoding="ascii", errors="replace"
+                            )
+                            == stale_token
+                        ):
+                            self._lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                time.sleep((5 + random.randint(0, 45)) / 1000)
+            except OSError as exc:
+                last_error = exc
+                break
+        else:
+            raise SharedTaskLockTimeout("Timed out acquiring shared task board lock")
+        if last_error is not None:
+            raise last_error
+
+        try:
+            self._load()
+            result = fn()
+            self._save()
+            return result
+        finally:
+            try:
+                if self._lock_path.read_text(encoding="ascii") == owner_token:
+                    self._lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _claim_loaded(self, task_id: str, assignee: str) -> SharedTask:
+        task = self._tasks.get(task_id)
+        if task is None:
+            raise KeyError(f"Task not found: {task_id}")
+        if not assignee.strip():
+            raise SharedTaskClaimError("A non-empty assignee is required to claim a task")
+        if task.status == "in_progress":
+            if task.assignee == assignee:
+                return task
+            raise SharedTaskClaimError(
+                f"Task '{task_id}' is already claimed by '{task.assignee or 'unknown'}'"
+            )
+        if task.status == "completed":
+            raise SharedTaskClaimError(f"Task '{task_id}' is already completed")
+        if task.status not in {"pending", "blocked"}:
+            raise SharedTaskClaimError(
+                f"Task '{task_id}' cannot be claimed from status '{task.status}'"
+            )
+        if task.assignee and task.assignee != assignee:
+            raise SharedTaskClaimError(
+                f"Task '{task_id}' is assigned to '{task.assignee}'"
+            )
+        incomplete = [
+            dependency_id
+            for dependency_id in task.blocked_by
+            if dependency_id not in self._tasks
+            or self._tasks[dependency_id].status != "completed"
+        ]
+        if incomplete:
+            raise SharedTaskClaimError(
+                f"Task '{task_id}' is blocked by incomplete tasks: {', '.join(incomplete)}"
+            )
+        task.assignee = assignee
+        task.status = "in_progress"
+        return task
 
     def create(
         self,
@@ -63,20 +189,22 @@ class SharedTaskStore:
         blocked_by: list[str] | None = None,
         created_by: str = "",
     ) -> SharedTask:
-        task_id = str(self._next_id)
-        self._next_id += 1
-        task = SharedTask(
-            id=task_id,
-            title=title,
-            description=description,
-            assignee=assignee,
-            blocks=blocks or [],
-            blocked_by=blocked_by or [],
-            created_by=created_by,
-        )
-        self._tasks[task_id] = task
-        self._save()
-        return task
+        def _create() -> SharedTask:
+            task_id = str(self._next_id)
+            self._next_id += 1
+            task = SharedTask(
+                id=task_id,
+                title=title,
+                description=description,
+                assignee=assignee,
+                blocks=blocks or [],
+                blocked_by=blocked_by or [],
+                created_by=created_by,
+            )
+            self._tasks[task_id] = task
+            return task
+
+        return self._mutate(_create)
 
     def get(self, task_id: str) -> SharedTask | None:
         self._load()
@@ -106,31 +234,42 @@ class SharedTaskStore:
         add_blocks: list[str] | None = None,
         add_blocked_by: list[str] | None = None,
     ) -> SharedTask | None:
-        self._load()
-        task = self._tasks.get(task_id)
-        if task is None:
-            return None
-        if status is not None:
-            task.status = status
-        if assignee is not None:
-            task.assignee = assignee
-        if description is not None:
-            task.description = description
-        if add_blocks:
-            for bid in add_blocks:
-                if bid not in task.blocks:
-                    task.blocks.append(bid)
-        if add_blocked_by:
-            for bid in add_blocked_by:
-                if bid not in task.blocked_by:
-                    task.blocked_by.append(bid)
-        self._save()
-        return task
+        def _update() -> SharedTask | None:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            if status == "in_progress":
+                self._claim_loaded(
+                    task_id, assignee if assignee is not None else task.assignee
+                )
+            elif assignee is not None:
+                task.assignee = assignee
+            if description is not None:
+                task.description = description
+            if add_blocks:
+                for bid in add_blocks:
+                    if bid not in task.blocks:
+                        task.blocks.append(bid)
+            if add_blocked_by:
+                for bid in add_blocked_by:
+                    if bid not in task.blocked_by:
+                        task.blocked_by.append(bid)
+            if status is not None and status != "in_progress":
+                task.status = status
+            return task
+
+        return self._mutate(_update)
+
+    def claim(self, task_id: str, assignee: str) -> SharedTask:
+        """Atomically claim one ready task for *assignee*."""
+        return self._mutate(lambda: self._claim_loaded(task_id, assignee))
 
     def init_empty(self) -> None:
-        self._tasks.clear()
-        self._next_id = 1
-        self._save()
+        def _clear() -> None:
+            self._tasks.clear()
+            self._next_id = 1
+
+        self._mutate(_clear)
 
 
 class DurableSharedTaskStore:
@@ -242,7 +381,7 @@ class DurableSharedTaskStore:
         if state is None or state.metadata.get("kind") != "shared_team_task":
             return None
         data = dict(state.input)
-        if status is not None:
+        if status is not None and status != "in_progress":
             data["board_status"] = status
         if assignee is not None:
             data["assignee"] = assignee
@@ -262,11 +401,20 @@ class DurableSharedTaskStore:
             for item in add_blocked_by or []
             if self._store.get(self._database_id(item)) is not None
         ]
-        updated = self._store.update_details(
-            database_id, input=data, add_dependencies=dependencies
-        )
-        if status is not None:
-            updated = self._store.update_board_status(database_id, status)
+        if status == "in_progress":
+            if description is not None or add_blocks or add_blocked_by:
+                raise SharedTaskClaimError(
+                    "Claim a task separately from changing its description or dependencies"
+                )
+            updated = self._store.claim_board_task(
+                database_id, assignee or str(data.get("assignee", ""))
+            )
+        else:
+            updated = self._store.update_details(
+                database_id, input=data, add_dependencies=dependencies
+            )
+            if status is not None:
+                updated = self._store.update_board_status(database_id, status)
         for blocked_id in add_blocks or []:
             target = self._store.get(self._database_id(blocked_id))
             if target is None:
@@ -282,6 +430,10 @@ class DurableSharedTaskStore:
                 add_dependencies=[database_id],
             )
         return self._to_shared(updated)
+
+    def claim(self, task_id: str, assignee: str) -> SharedTask:
+        state = self._store.claim_board_task(self._database_id(task_id), assignee)
+        return self._to_shared(state)
 
     def init_empty(self) -> None:
         # Team names are unique, so a newly created team has no matching rows.

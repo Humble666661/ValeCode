@@ -181,7 +181,7 @@ def build_teammate_tools(
         TaskCreateTool(team_manager, team_name, agent_name),
         TaskGetTool(team_manager, team_name),
         TaskListTool(team_manager, team_name),
-        TaskUpdateTool(team_manager, team_name),
+        TaskUpdateTool(team_manager, team_name, agent_name),
         SendMessageTool(team_manager, team_name, agent_id, agent_name),
     ]
 

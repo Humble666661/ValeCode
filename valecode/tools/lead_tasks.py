@@ -78,6 +78,8 @@ class LeadTaskCreateTool(_LeadTaskTool):
                 assignee=p.assignee,
                 blocks=p.blocks,
                 blocked_by=p.blocked_by,
+                priority=p.priority,
+                progress=p.progress,
             )
         )
 
@@ -115,7 +117,9 @@ class LeadTaskListTool(_LeadTaskTool):
         if error is not None:
             return error
         return await TaskListTool(self._team_manager, team_name or "").execute(
-            TaskListParams(status=p.status, assignee=p.assignee)
+            TaskListParams(
+                status=p.status, assignee=p.assignee, priority=p.priority
+            )
         )
 
 
@@ -150,6 +154,8 @@ class LeadTaskUpdateTool(_LeadTaskTool):
                 description=p.description,
                 add_blocks=p.add_blocks,
                 add_blocked_by=p.add_blocked_by,
+                priority=p.priority,
+                progress=p.progress,
             )
         )
 

@@ -357,6 +357,8 @@ class TaskStore:
             data = load_json(row["input_json"], {})
             previous_board_status = data.get("board_status", "pending")
             data["board_status"] = board_status
+            if board_status == "completed":
+                data["progress"] = 100
             target = status_map[board_status]
             now = utc_now()
             completed_at = now if target == TaskStatus.SUCCEEDED else None

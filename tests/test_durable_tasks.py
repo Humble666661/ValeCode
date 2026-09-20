@@ -617,3 +617,18 @@ def test_durable_team_task_allocates_unique_ids_concurrently(tmp_path):
     assert len(set(ids)) == 20
     board = DurableSharedTaskStore(sessions.task_store, "alpha")
     assert len(board.list_tasks()) == 20
+
+
+def test_durable_team_task_persists_priority_and_progress(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    task = board.create("Important", priority="high", progress=20)
+
+    assert board.get(task.id).priority == "high"
+    assert board.get(task.id).progress == 20
+    updated = board.update(task.id, progress=75)
+    assert updated.progress == 75
+    assert [item.id for item in board.list_tasks(priority="high")] == [task.id]
+
+    completed = board.update(task.id, status="completed")
+    assert completed.progress == 100

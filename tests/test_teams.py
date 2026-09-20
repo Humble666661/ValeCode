@@ -364,6 +364,25 @@ class TestSharedTaskStore:
         assert len(set(ids)) == 20
         assert len(SharedTaskStore(path).list_tasks()) == 20
 
+    def test_priority_and_progress_are_persisted_and_validated(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        task = store.create(
+            title="Important", priority="high", progress=15
+        )
+        assert task.priority == "high"
+        assert task.progress == 15
+
+        updated = store.update(task.id, priority="low", progress=60)
+        assert updated.priority == "low"
+        assert updated.progress == 60
+        assert [item.id for item in store.list_tasks(priority="low")] == [task.id]
+
+        completed = store.update(task.id, status="completed")
+        assert completed.progress == 100
+        with pytest.raises(ValueError, match="between 0 and 100"):
+            store.update(task.id, progress=101)
+
     @pytest.mark.asyncio
     async def test_task_update_claims_only_for_current_teammate(self, tmp_dir):
         store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
@@ -398,13 +417,18 @@ class TestSharedTaskStore:
         manager.get_task_store.return_value = store
 
         created = await LeadTaskCreateTool(manager, "lead-1").execute(
-            LeadTaskCreateParams(team_name="alpha", title="Implement")
+            LeadTaskCreateParams(
+                team_name="alpha", title="Implement", priority="high", progress=10
+            )
         )
         assert created.is_error is False
 
         assigned = await LeadTaskUpdateTool(manager, "lead-1").execute(
             LeadTaskUpdateParams(
-                team_name="alpha", task_id="1", assignee="worker"
+                team_name="alpha",
+                task_id="1",
+                assignee="worker",
+                progress=65,
             )
         )
         assert assigned.is_error is False
@@ -414,6 +438,7 @@ class TestSharedTaskStore:
             LeadTaskListParams(team_name="alpha")
         )
         assert "Implement" in listed.output
+        assert "[high, 65%]" in listed.output
 
         denied = await LeadTaskUpdateTool(manager, "lead-1").execute(
             LeadTaskUpdateParams(

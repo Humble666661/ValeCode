@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from valecode.tools.base import Tool, ToolResult
 
@@ -17,6 +17,8 @@ class TaskCreateParams(BaseModel):
     assignee: str = ""
     blocks: list[str] | None = None
     blocked_by: list[str] | None = None
+    priority: Literal["low", "medium", "high"] = "medium"
+    progress: int = Field(default=0, ge=0, le=100)
 
 
 class TaskCreateTool(Tool):
@@ -51,6 +53,8 @@ class TaskCreateTool(Tool):
                 blocks=p.blocks,
                 blocked_by=p.blocked_by,
                 created_by=self._agent_name,
+                priority=p.priority,
+                progress=p.progress,
             )
         except (KeyError, TimeoutError, ValueError) as exc:
             return ToolResult(output=str(exc), is_error=True)
@@ -61,6 +65,8 @@ class TaskCreateTool(Tool):
                 f"  ID: {task.id}\n"
                 f"  Title: {task.title}\n"
                 f"  Status: {task.status}\n"
+                f"  Priority: {task.priority}\n"
+                f"  Progress: {task.progress}%\n"
                 f"  Assignee: {task.assignee or '(unassigned)'}"
             )
         )

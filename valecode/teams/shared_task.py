@@ -22,6 +22,7 @@ class SharedTaskClaimError(ValueError):
 
 
 TASK_BOARD_LOCK_ATTEMPTS = 50
+TASK_PRIORITIES = {"low", "medium", "high"}
 
 
 @dataclass
@@ -34,6 +35,8 @@ class SharedTask:
     blocks: list[str] = field(default_factory=list)
     blocked_by: list[str] = field(default_factory=list)
     created_by: str = ""
+    priority: str = "medium"
+    progress: int = 0
 
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +56,17 @@ def _normalize_task_ids(values: list[str] | None) -> list[str]:
         if task_id not in result:
             result.append(task_id)
     return result
+
+
+def _validate_task_metrics(priority: str, progress: int) -> None:
+    if priority not in TASK_PRIORITIES:
+        raise ValueError(
+            f"Invalid task priority '{priority}'; expected low, medium, or high"
+        )
+    if isinstance(progress, bool) or not isinstance(progress, int):
+        raise ValueError("Task progress must be an integer from 0 to 100")
+    if progress < 0 or progress > 100:
+        raise ValueError("Task progress must be between 0 and 100")
 
 
 def _apply_dependency_relations(
@@ -260,7 +274,10 @@ class SharedTaskStore:
         blocks: list[str] | None = None,
         blocked_by: list[str] | None = None,
         created_by: str = "",
+        priority: str = "medium",
+        progress: int = 0,
     ) -> SharedTask:
+        _validate_task_metrics(priority, progress)
         def _create() -> SharedTask:
             task_id = str(self._next_id)
             self._next_id += 1
@@ -270,6 +287,8 @@ class SharedTaskStore:
                 description=description,
                 assignee=assignee,
                 created_by=created_by,
+                priority=priority,
+                progress=progress,
             )
             self._tasks[task_id] = task
             _apply_dependency_relations(
@@ -291,6 +310,7 @@ class SharedTaskStore:
         self,
         status: str | None = None,
         assignee: str | None = None,
+        priority: str | None = None,
     ) -> list[SharedTask]:
         self._load()
         result = list(self._tasks.values())
@@ -298,6 +318,8 @@ class SharedTaskStore:
             result = [t for t in result if t.status == status]
         if assignee:
             result = [t for t in result if t.assignee == assignee]
+        if priority:
+            result = [t for t in result if t.priority == priority]
         return result
 
 
@@ -309,7 +331,24 @@ class SharedTaskStore:
         description: str | None = None,
         add_blocks: list[str] | None = None,
         add_blocked_by: list[str] | None = None,
+        priority: str | None = None,
+        progress: int | None = None,
     ) -> SharedTask | None:
+        if status == "in_progress" and (
+            description is not None
+            or add_blocks
+            or add_blocked_by
+            or priority is not None
+            or progress is not None
+        ):
+            raise SharedTaskClaimError(
+                "Claim a task separately from changing its fields or dependencies"
+            )
+        if priority is not None or progress is not None:
+            _validate_task_metrics(
+                priority if priority is not None else "medium",
+                progress if progress is not None else 0,
+            )
         def _update() -> SharedTask | None:
             task = self._tasks.get(task_id)
             if task is None:
@@ -318,6 +357,10 @@ class SharedTaskStore:
                 task.assignee = assignee
             if description is not None:
                 task.description = description
+            if priority is not None:
+                task.priority = priority
+            if progress is not None:
+                task.progress = progress
             _apply_dependency_relations(
                 self._tasks,
                 task_id,
@@ -330,6 +373,8 @@ class SharedTaskStore:
                 )
             elif status is not None:
                 task.status = status
+                if status == "completed":
+                    task.progress = 100
             return task
 
         return self._mutate(_update)
@@ -368,6 +413,8 @@ class DurableSharedTaskStore:
             blocks=list(data.get("blocks", [])),
             blocked_by=list(data.get("blocked_by", [])),
             created_by=str(data.get("created_by", "")),
+            priority=str(data.get("priority", "medium")),
+            progress=int(data.get("progress", 0)),
         )
 
     def _states(self) -> list[TaskState]:
@@ -385,7 +432,10 @@ class DurableSharedTaskStore:
         blocks: list[str] | None = None,
         blocked_by: list[str] | None = None,
         created_by: str = "",
+        priority: str = "medium",
+        progress: int = 0,
     ) -> SharedTask:
+        _validate_task_metrics(priority, progress)
         blocks = _normalize_task_ids(blocks)
         blocked_by = _normalize_task_ids(blocked_by)
         dependencies = [
@@ -412,6 +462,8 @@ class DurableSharedTaskStore:
                         "blocks": blocks,
                         "blocked_by": blocked_by,
                         "created_by": created_by,
+                        "priority": priority,
+                        "progress": progress,
                         "board_status": "pending",
                     },
                     task_id=self._database_id(display_id),
@@ -449,13 +501,18 @@ class DurableSharedTaskStore:
         return self._to_shared(state)
 
     def list_tasks(
-        self, status: str | None = None, assignee: str | None = None
+        self,
+        status: str | None = None,
+        assignee: str | None = None,
+        priority: str | None = None,
     ) -> list[SharedTask]:
         tasks = [self._to_shared(state) for state in self._states()]
         if status:
             tasks = [task for task in tasks if task.status == status]
         if assignee:
             tasks = [task for task in tasks if task.assignee == assignee]
+        if priority:
+            tasks = [task for task in tasks if task.priority == priority]
         return tasks
 
     def update(
@@ -466,7 +523,14 @@ class DurableSharedTaskStore:
         description: str | None = None,
         add_blocks: list[str] | None = None,
         add_blocked_by: list[str] | None = None,
+        priority: str | None = None,
+        progress: int | None = None,
     ) -> SharedTask | None:
+        if priority is not None or progress is not None:
+            _validate_task_metrics(
+                priority if priority is not None else "medium",
+                progress if progress is not None else 0,
+            )
         add_blocks = _normalize_task_ids(add_blocks)
         add_blocked_by = _normalize_task_ids(add_blocked_by)
         database_id = self._database_id(task_id)
@@ -487,6 +551,12 @@ class DurableSharedTaskStore:
             data["assignee"] = assignee
         if description is not None:
             data["description"] = description
+        if priority is not None:
+            data["priority"] = priority
+        if progress is not None:
+            data["progress"] = progress
+        if status == "completed":
+            data["progress"] = 100
         for field_name, additions in (
             ("blocks", add_blocks),
             ("blocked_by", add_blocked_by),
@@ -501,9 +571,15 @@ class DurableSharedTaskStore:
             for item in add_blocked_by or []
         ]
         if status == "in_progress":
-            if description is not None or add_blocks or add_blocked_by:
+            if (
+                description is not None
+                or add_blocks
+                or add_blocked_by
+                or priority is not None
+                or progress is not None
+            ):
                 raise SharedTaskClaimError(
-                    "Claim a task separately from changing its description or dependencies"
+                    "Claim a task separately from changing its fields or dependencies"
                 )
             updated = self._store.claim_board_task(
                 database_id, assignee or str(data.get("assignee", ""))

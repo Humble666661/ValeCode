@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 class TaskListParams(BaseModel):
     status: str | None = None
     assignee: str | None = None
+    priority: Literal["low", "medium", "high"] | None = None
 
 
 class TaskListTool(Tool):
@@ -39,7 +40,9 @@ class TaskListTool(Tool):
         if store is None:
             return ToolResult(output=f"Task store not found for team '{self._team_name}'", is_error=True)
 
-        tasks = store.list_tasks(status=p.status, assignee=p.assignee)
+        tasks = store.list_tasks(
+            status=p.status, assignee=p.assignee, priority=p.priority
+        )
 
         if not tasks:
             filters = []
@@ -47,6 +50,8 @@ class TaskListTool(Tool):
                 filters.append(f"status={p.status}")
             if p.assignee:
                 filters.append(f"assignee={p.assignee}")
+            if p.priority:
+                filters.append(f"priority={p.priority}")
             filter_str = f" (filters: {', '.join(filters)})" if filters else ""
             return ToolResult(output=f"No tasks found{filter_str}")
 
@@ -64,6 +69,9 @@ class TaskListTool(Tool):
             deps = ""
             if t.blocked_by:
                 deps = f" (blocked by: {', '.join(t.blocked_by)})"
-            lines.append(f"  {icon} [{t.id}] {t.title}{assignee}{deps}")
+            metrics = f" [{t.priority}, {t.progress}%]"
+            lines.append(
+                f"  {icon} [{t.id}] {t.title}{metrics}{assignee}{deps}"
+            )
 
         return ToolResult(output="\n".join(lines))

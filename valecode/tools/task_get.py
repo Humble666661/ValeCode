@@ -43,6 +43,8 @@ class TaskGetTool(Tool):
             f"Task {task.id}:",
             f"  Title:      {task.title}",
             f"  Status:     {task.status}",
+            f"  Priority:   {task.priority}",
+            f"  Progress:   {task.progress}%",
             f"  Assignee:   {task.assignee or '(unassigned)'}",
             f"  Created by: {task.created_by or '(unknown)'}",
         ]

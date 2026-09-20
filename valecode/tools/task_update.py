@@ -1,9 +1,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from valecode.tools.base import Tool, ToolResult
 
@@ -18,6 +18,8 @@ class TaskUpdateParams(BaseModel):
     description: str | None = None
     add_blocks: list[str] | None = None
     add_blocked_by: list[str] | None = None
+    priority: Literal["low", "medium", "high"] | None = None
+    progress: int | None = Field(default=None, ge=0, le=100)
 
 
 VALID_STATUSES = {"pending", "in_progress", "completed", "blocked"}
@@ -75,11 +77,17 @@ class TaskUpdateTool(Tool):
                         ),
                         is_error=True,
                     )
-                if p.description is not None or p.add_blocks or p.add_blocked_by:
+                if (
+                    p.description is not None
+                    or p.add_blocks
+                    or p.add_blocked_by
+                    or p.priority is not None
+                    or p.progress is not None
+                ):
                     return ToolResult(
                         output=(
-                            "Claim the task first, then update its description or "
-                            "dependencies in a separate TaskUpdate call"
+                            "Claim the task first, then update its fields or dependencies "
+                            "in a separate TaskUpdate call"
                         ),
                         is_error=True,
                     )
@@ -92,6 +100,8 @@ class TaskUpdateTool(Tool):
                     description=p.description,
                     add_blocks=p.add_blocks,
                     add_blocked_by=p.add_blocked_by,
+                    priority=p.priority,
+                    progress=p.progress,
                 )
         except (KeyError, TimeoutError, ValueError) as exc:
             return ToolResult(output=str(exc), is_error=True)
@@ -110,6 +120,10 @@ class TaskUpdateTool(Tool):
             changes.append(f"blocks += {', '.join(p.add_blocks)}")
         if p.add_blocked_by:
             changes.append(f"blocked_by += {', '.join(p.add_blocked_by)}")
+        if p.priority is not None:
+            changes.append(f"priority → {p.priority}")
+        if p.progress is not None:
+            changes.append(f"progress → {task.progress}%")
 
         return ToolResult(
             output=f"Task {task.id} updated: {'; '.join(changes) if changes else 'no changes'}"

@@ -646,6 +646,7 @@ class ValeCodeApp(App):
         self.skill_executor: SkillExecutor | None = None
         self._load_skill_tool: LoadSkill | None = None
         self.agent_loader: AgentLoader | None = None
+        self.agent_tool: AgentTool | None = None
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
         self._notification_check_task: asyncio.Task[None] | None = None
@@ -914,7 +915,7 @@ class ValeCodeApp(App):
             task_store=self.session_manager.task_store,
         )
 
-        agent_tool = AgentTool(
+        self.agent_tool = AgentTool(
             agent_loader=self.agent_loader,
             task_manager=self.task_manager,
             trace_manager=self.trace_manager,
@@ -924,7 +925,7 @@ class ValeCodeApp(App):
             worktree_manager=self.worktree_manager,
             team_manager=self.team_manager,
         )
-        self.registry.register(agent_tool)
+        self.registry.register(self.agent_tool)
 
         team_create_tool = TeamCreateTool(
             team_manager=self.team_manager,
@@ -1078,6 +1079,7 @@ class ValeCodeApp(App):
                 "set_conversation": self._set_conversation,
                 "clear_chat": self._clear_chat,
                 "render_restored": self._render_restored_messages,
+                "recover_tasks": self._recover_session_tasks,
                 "skill_loader": self.skill_loader,
                 "skill_executor": self.skill_executor,
                 "exit_app": self._exit_from_command,
@@ -1090,6 +1092,11 @@ class ValeCodeApp(App):
             self.agent.session_id = session.session_id
             if self.agent.permission_checker:
                 self.agent.permission_checker.bind_session(session.session_id)
+
+    def _recover_session_tasks(self, session_id: str) -> list[str]:
+        if self.agent_tool is None:
+            return []
+        return self.agent_tool.recover_persisted_tasks(session_id)
 
     def _persist_compact_boundary(self, notification: CompactNotification) -> None:
         """Layer-2 compact 后写入 compact_boundary 记录。
@@ -1641,16 +1648,23 @@ class ValeCodeApp(App):
         if not completed or self.agent is None:
             return
 
-        inject_task_notifications(self.conversation, completed)
-
+        active_session_id = self.session.session_id if self.session else ""
+        visible: list[BackgroundTask] = []
         for task in completed:
+            if hasattr(self, "team_manager"):
+                self.team_manager.on_teammate_completed(task.agent.agent_id)
+            if task.agent.session_id == active_session_id:
+                visible.append(task)
+        if not visible:
+            return
+
+        inject_task_notifications(self.conversation, visible)
+
+        for task in visible:
             status_icon = "✓" if task.status == "completed" else "✗"
             self._show_system_message(
                 f"{status_icon} 后台任务完成: [{task.id}] {task.name} — {task.status}"
             )
-
-            if hasattr(self, 'team_manager'):
-                self.team_manager.on_teammate_completed(task.agent.agent_id)
 
         self._agent_task = asyncio.create_task(
             self._send_message("", is_notification=True)

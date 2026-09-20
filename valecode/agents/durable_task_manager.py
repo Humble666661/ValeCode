@@ -51,6 +51,7 @@ class DurableTaskManager(TaskManager):
         self.result_gc_interval = max(0.05, result_gc_interval)
         self._last_result_gc = 0.0
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._shutdown_requeue_ids: set[str] = set()
         self._global_capacity = asyncio.Semaphore(max(1, max_concurrency))
         self._team_limit = max(1, per_team_concurrency)
         self._team_capacity: dict[str, asyncio.Semaphore] = {}
@@ -185,12 +186,21 @@ class DurableTaskManager(TaskManager):
         *,
         dependencies: list[str] | None = None,
         max_attempts: int = 3,
+        resume_spec: dict[str, Any] | None = None,
     ) -> str:
+        parent_run_id = getattr(agent, "parent_run_id", None)
+        task_run_id = (
+            parent_run_id
+            if isinstance(parent_run_id, str) and parent_run_id
+            else getattr(agent, "_current_run_id", None)
+        )
+        if not isinstance(task_run_id, str):
+            task_run_id = None
         with agent.tracing.span(
             "task.schedule",
             {
                 "session.id": agent.session_id,
-                "run.id": agent._current_run_id or "",
+                "run.id": task_run_id or "",
                 "agent.id": agent.agent_id,
                 "task.name": name,
                 "task.dependencies": dependencies or [],
@@ -206,11 +216,24 @@ class DurableTaskManager(TaskManager):
                 status="queued",
             )
             self._tasks[task_id] = bg
+            resumable = (
+                resume_spec is not None
+                and fork_conversation is None
+                and not getattr(agent, "team_name", "")
+            )
+            resume_reason = ""
+            if not resumable:
+                if fork_conversation is not None:
+                    resume_reason = "fork conversation is not persisted"
+                elif getattr(agent, "team_name", ""):
+                    resume_reason = "team runtime is not reconstructable"
+                else:
+                    resume_reason = "no reconstruction descriptor was supplied"
             self.task_store.create(
                 {"task": task, "name": bg.name},
                 task_id=task_id,
                 session_id=agent.session_id or None,
-                run_id=agent._current_run_id,
+                run_id=task_run_id,
                 team_name=agent.team_name or None,
                 max_attempts=max_attempts,
                 dependencies=dependencies,
@@ -221,6 +244,9 @@ class DurableTaskManager(TaskManager):
                         if isinstance(getattr(agent, "work_dir", None), str)
                         else ""
                     ),
+                    "resumable": resumable,
+                    "resume_spec": resume_spec if resumable else None,
+                    "resume_reason": resume_reason,
                 },
             )
             handle = asyncio.create_task(self._run_durable(task_id, fork_conversation))
@@ -424,6 +450,20 @@ class DurableTaskManager(TaskManager):
         )
 
     def _cancel_persisted(self, bg: BackgroundTask) -> None:
+        if bg.id in self._shutdown_requeue_ids:
+            state = self.task_store.get(bg.id)
+            bg.status = "queued"
+            bg.result = "Task was safely queued during worker shutdown"
+            if state is None or state.status == TaskStatus.QUEUED:
+                return
+            released = self.task_store.release_for_shutdown(
+                bg.id, self.worker_id
+            )
+            if released is not None:
+                return
+            # Ownership changed between inspection and release.  Do not cancel
+            # work now owned by another worker.
+            return
         bg.status = "cancelled"
         bg.result = "Task was cancelled"
         state = self.task_store.get(bg.id)
@@ -527,6 +567,9 @@ class DurableTaskManager(TaskManager):
             handle = self._async_tasks.get(task_id)
             if handle is not None and not handle.done():
                 handle.cancel()
+                # Cancellation can happen before the coroutine gets its first
+                # timeslice, in which case its exception handler never runs.
+                self._cancel_persisted(bg)
                 return True
 
         # A recovered queued task may have no process-local handle. It must
@@ -546,4 +589,23 @@ class DurableTaskManager(TaskManager):
             self._maintenance_task.cancel()
             await asyncio.gather(self._maintenance_task, return_exceptions=True)
             self._maintenance_task = None
-        await super().shutdown()
+        for task_id, handle in list(self._async_tasks.items()):
+            if handle.done():
+                continue
+            state = self.task_store.get(task_id)
+            resumable = (
+                state is not None
+                and isinstance(state.metadata, dict)
+                and state.metadata.get("resumable") is True
+                and isinstance(state.metadata.get("resume_spec"), dict)
+            )
+            if resumable:
+                self._shutdown_requeue_ids.add(task_id)
+            else:
+                bg = self._tasks.get(task_id)
+                if bg is not None:
+                    self._cancel_persisted(bg)
+        try:
+            await super().shutdown()
+        finally:
+            self._shutdown_requeue_ids.clear()

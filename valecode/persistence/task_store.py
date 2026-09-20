@@ -560,6 +560,69 @@ class TaskStore:
                 recovered.append(self._from_row(updated))
         return recovered
 
+    def release_for_shutdown(
+        self,
+        task_id: str,
+        worker_id: str,
+        *,
+        error: str = "Worker shut down before completion",
+    ) -> TaskState | None:
+        """Return one lease owned by this worker to the durable queue.
+
+        A graceful worker shutdown is not an execution failure.  The interrupted
+        attempt remains in the audit trail, while ``max_attempts`` is increased
+        once so the task retains the retry budget it had before interruption.
+        """
+        now = utc_now()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if (
+                row is None
+                or row["status"] not in {
+                    TaskStatus.LEASED.value,
+                    TaskStatus.RUNNING.value,
+                }
+                or row["lease_owner"] != worker_id
+            ):
+                return None
+            connection.execute(
+                """
+                UPDATE task_attempts
+                SET status = 'interrupted', error = ?, completed_at = ?
+                WHERE task_id = ? AND attempt = ? AND completed_at IS NULL
+                """,
+                (error, now, task_id, row["attempt_count"]),
+            )
+            connection.execute(
+                """
+                UPDATE tasks SET status = 'queued', error = ?,
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    heartbeat_at = NULL, next_retry_at = NULL,
+                    max_attempts = max_attempts + 1, completed_at = NULL,
+                    updated_at = ?, version = version + 1
+                WHERE id = ?
+                """,
+                (error, now, task_id),
+            )
+            self.events._append(
+                connection,
+                "task.worker_shutdown",
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                task_id=task_id,
+                payload={
+                    "attempt": row["attempt_count"],
+                    "worker_id": worker_id,
+                    "to": TaskStatus.QUEUED.value,
+                },
+            )
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return self._from_row(updated)
+
     def start_attempt(
         self,
         task_id: str,

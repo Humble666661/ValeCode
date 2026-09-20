@@ -153,11 +153,14 @@ async def test_remote_delivers_completed_background_task_to_lead() -> None:
 
     server = RemoteServer([])
     server.agent = MagicMock()
+    server.session_id = "session-active"
     server.task_manager = MagicMock()
+    task_agent = MagicMock()
+    task_agent.session_id = "session-active"
     completed = BackgroundTask(
         id="task-1",
         name="Explore",
-        agent=MagicMock(),
+        agent=task_agent,
         task="inspect project",
         status="completed",
         result="found the implementation",
@@ -176,6 +179,36 @@ async def test_remote_delivers_completed_background_task_to_lead() -> None:
     server._handle_user_message.assert_awaited_once_with(
         prompt, dispatch_commands=False
     )
+
+
+@pytest.mark.asyncio
+async def test_remote_does_not_inject_another_sessions_task() -> None:
+    from valecode.agents.task_manager import BackgroundTask
+
+    server = RemoteServer([])
+    server.agent = MagicMock()
+    server.session_id = "session-active"
+    server.task_manager = MagicMock()
+    task_agent = MagicMock()
+    task_agent.session_id = "session-old"
+    server.task_manager.poll_completed.return_value = [
+        BackgroundTask(
+            id="task-old",
+            name="Explore",
+            agent=task_agent,
+            task="old work",
+            status="completed",
+            result="old result",
+        )
+    ]
+    server._connections.add(MagicMock())
+    server._broadcast = AsyncMock()
+    server._handle_user_message = AsyncMock()
+
+    await server._process_task_notifications()
+
+    server._broadcast.assert_not_awaited()
+    server._handle_user_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

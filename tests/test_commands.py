@@ -435,6 +435,44 @@ class TestSessionHandler:
         await handle_session(ctx)
         assert "用法" in ui.messages[0]
 
+    @pytest.mark.asyncio
+    async def test_resume_recovers_tasks_after_conversation_is_restored(self) -> None:
+        from valecode.commands.handlers.session import handle_session
+
+        ui = MockUI()
+        restored_session = MagicMock()
+        restored_session.session_id = "session-restored"
+        restored_session.meta.message_count = 2
+        manager = MagicMock()
+        manager.resume.return_value = SimpleNamespace(
+            session=restored_session,
+            messages=[],
+        )
+        order: list[str] = []
+
+        async def render(_messages):
+            order.append("render")
+
+        def recover(session_id):
+            order.append("recover")
+            assert session_id == "session-restored"
+            return ["task-1"]
+
+        ctx = _make_context(args="resume session-restored", ui=ui)
+        ctx.session_manager = manager
+        ctx.session = MagicMock()
+        ctx.config = {
+            "set_session": lambda _session: order.append("session"),
+            "set_conversation": lambda _conversation: order.append("conversation"),
+            "render_restored": render,
+            "recover_tasks": recover,
+        }
+
+        await handle_session(ctx)
+
+        assert order == ["session", "conversation", "render", "recover"]
+        assert any("task-1" in message for message in ui.messages)
+
 class TestMemoryHandler:
     @pytest.mark.asyncio
     async def test_memory_display(self) -> None:

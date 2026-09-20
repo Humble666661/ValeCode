@@ -659,6 +659,16 @@ class TestTaskManager:
         assert tm._async_tasks == {}
 
     @pytest.mark.asyncio
+    async def test_shutdown_before_first_timeslice_clears_handle(self, mock_agent):
+        tm = TaskManager()
+        task_id = tm.launch(mock_agent, "not started")
+
+        await tm.shutdown()
+
+        assert tm.get(task_id).status == "cancelled"
+        assert tm._async_tasks == {}
+
+    @pytest.mark.asyncio
     async def test_failed_task(self):
         agent = MagicMock()
         agent.total_input_tokens = 0
@@ -820,6 +830,200 @@ class TestAgentToolParams:
         assert params.run_in_background is True
         assert params.name == "my-agent"
         assert params.isolation == "worktree"
+
+
+class TestPersistedSubagentRecovery:
+    @staticmethod
+    def _parent(tmp_path: Path, sessions):
+        from valecode.agent import Agent
+
+        client = MagicMock()
+        client.model = "parent-model"
+        parent = Agent(
+            client=client,
+            registry=make_registry("ReadFile", "WriteFile", "Agent"),
+            protocol="anthropic",
+            work_dir=str(tmp_path),
+            run_store=sessions.run_store,
+            provider_name="test",
+            model="parent-model",
+        )
+        parent.session_id = sessions.create().session_id
+        return parent
+
+    @pytest.mark.asyncio
+    async def test_background_launch_persists_exact_resume_contract(
+        self, tmp_path: Path
+    ):
+        from valecode.agents.durable_task_manager import DurableTaskManager
+        from valecode.memory.session import SessionManager
+        from valecode.tools.agent_tool import AgentTool, AgentToolParams
+
+        sessions = SessionManager(str(tmp_path))
+        parent = self._parent(tmp_path, sessions)
+        parent_run = sessions.run_store.create_run(
+            parent.session_id,
+            input="lead request",
+            agent_id=parent.agent_id,
+            trace_id="trace-parent",
+        )
+        parent._current_run_id = parent_run.id
+        parent._current_trace_id = parent_run.trace_id
+        definition = AgentDef(
+            agent_type="reader",
+            when_to_use="read files",
+            system_prompt="Inspect carefully.",
+            tools=["ReadFile"],
+            disallowed_tools=["WriteFile"],
+            model="inherit",
+            max_turns=9,
+            permission_mode="acceptEdits",
+            background=True,
+            source="project",
+        )
+        loader = MagicMock()
+        loader.get.return_value = definition
+        manager = DurableTaskManager(sessions.task_store)
+        tool = AgentTool(
+            agent_loader=loader,
+            task_manager=manager,
+            trace_manager=TraceManager(),
+            parent_agent=parent,
+        )
+
+        result = await tool.execute(AgentToolParams(
+            prompt="inspect",
+            description="test",
+            subagent_type="reader",
+            run_in_background=True,
+        ))
+
+        assert result.is_error is False
+        task = manager.list_tasks()[0]
+        state = sessions.task_store.get(task.id)
+        assert state.run_id == parent_run.id
+        assert state.metadata["resumable"] is True
+        assert state.metadata["resume_spec"] == {
+            "version": 1,
+            "agent_type": "reader",
+            "when_to_use": "read files",
+            "system_prompt": "Inspect carefully.",
+            "tools": ["ReadFile"],
+            "disallowed_tools": ["WriteFile"],
+            "model": "inherit",
+            "max_turns": 9,
+            "permission_mode": "acceptEdits",
+            "source": "project",
+        }
+        assert task.agent.model == "parent-model"
+        assert manager.cancel(task.id) is True
+        await asyncio.gather(manager._async_tasks[task.id], return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_recovers_valid_task_for_active_session_only(self, tmp_path: Path):
+        from valecode.agents.durable_task_manager import DurableTaskManager
+        from valecode.memory.session import SessionManager
+        from valecode.tools.agent_tool import AgentTool
+
+        sessions = SessionManager(str(tmp_path))
+        parent = self._parent(tmp_path, sessions)
+        manager = DurableTaskManager(sessions.task_store)
+        definition = AgentDef(
+            agent_type="reader",
+            when_to_use="read files",
+            system_prompt="Inspect carefully.",
+            tools=["ReadFile"],
+            disallowed_tools=["WriteFile"],
+            model="inherit",
+            max_turns=9,
+            permission_mode="default",
+            background=True,
+            source="project",
+        )
+        spec = AgentTool._resume_spec(definition, None)
+        parent_run = sessions.run_store.create_run(
+            parent.session_id,
+            input="lead request",
+            agent_id=parent.agent_id,
+            trace_id="trace-parent",
+        )
+        task = sessions.task_store.create(
+            {"task": "continue inspection", "name": "reader"},
+            session_id=parent.session_id,
+            run_id=parent_run.id,
+            metadata={"resumable": True, "resume_spec": spec},
+        )
+        other_session = sessions.create()
+        other = sessions.task_store.create(
+            {"task": "do not adopt", "name": "other"},
+            session_id=other_session.session_id,
+            metadata={"resumable": True, "resume_spec": spec},
+        )
+        tool = AgentTool(
+            agent_loader=MagicMock(),
+            task_manager=manager,
+            trace_manager=TraceManager(),
+            parent_agent=parent,
+        )
+
+        with patch(
+            "valecode.agent.Agent.run_to_completion",
+            new=AsyncMock(return_value="recovered"),
+        ):
+            adopted = tool.recover_persisted_tasks(parent.session_id)
+            assert adopted == [task.id]
+            recovered = manager.get(task.id)
+            assert recovered.agent.agent_type == "reader"
+            assert recovered.agent.max_iterations == 9
+            assert recovered.agent.model == "parent-model"
+            assert recovered.agent.parent_run_id == parent_run.id
+            assert recovered.agent.trace_id == "trace-parent"
+            assert [item.name for item in recovered.agent.registry.list_tools()] == [
+                "ReadFile"
+            ]
+            await manager._async_tasks[task.id]
+
+        assert manager.get(other.id) is None
+        await manager.shutdown()
+        other_session.close()
+
+    @pytest.mark.asyncio
+    async def test_invalid_and_legacy_descriptors_remain_visible_but_idle(
+        self, tmp_path: Path
+    ):
+        from valecode.agents.durable_task_manager import DurableTaskManager
+        from valecode.memory.session import SessionManager
+        from valecode.tools.agent_tool import AgentTool
+
+        sessions = SessionManager(str(tmp_path))
+        parent = self._parent(tmp_path, sessions)
+        manager = DurableTaskManager(sessions.task_store)
+        invalid = sessions.task_store.create(
+            {"task": "invalid"},
+            session_id=parent.session_id,
+            metadata={
+                "resumable": True,
+                "resume_spec": {"version": 1, "max_turns": True},
+            },
+        )
+        legacy = sessions.task_store.create(
+            {"task": "legacy"},
+            session_id=parent.session_id,
+            metadata={},
+        )
+        tool = AgentTool(
+            agent_loader=MagicMock(),
+            task_manager=manager,
+            trace_manager=TraceManager(),
+            parent_agent=parent,
+        )
+
+        assert tool.recover_persisted_tasks(parent.session_id) == []
+        assert manager.get(invalid.id) is None
+        assert manager.get(legacy.id) is None
+        assert sessions.task_store.get(invalid.id).status.value == "queued"
+        assert sessions.task_store.get(legacy.id).status.value == "queued"
+        await manager.shutdown()
 
 # =====================================================================
 # 11. Agent（run_to_completion 基础功能、agent_id、trace_id）

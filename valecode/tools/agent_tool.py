@@ -46,6 +46,7 @@ PERMISSION_MODE_MAP = {
 
 
 FORK_QUERY_SOURCE = "agent:builtin:fork"
+RESUME_SPEC_VERSION = 1
 
 TEAMMATE_ADDENDUM = (
     "\n\nIMPORTANT: You are running as an agent in a team.\n"
@@ -114,6 +115,187 @@ class AgentTool(Tool):
         sub_agent.execution_controller = self._parent_agent.execution_controller
         sub_agent.cancellation_token = self._parent_agent.cancellation_token
         sub_agent._owns_cancellation_token = False
+
+    @staticmethod
+    def _resume_spec(
+        definition: Any,
+        model_override: str | None,
+    ) -> dict[str, Any]:
+        """Snapshot the execution contract without persisting credentials."""
+        return {
+            "version": RESUME_SPEC_VERSION,
+            "agent_type": definition.agent_type,
+            "when_to_use": definition.when_to_use,
+            "system_prompt": definition.system_prompt,
+            "tools": list(definition.tools),
+            "disallowed_tools": list(definition.disallowed_tools),
+            "model": model_override or definition.model,
+            "max_turns": definition.max_turns,
+            "permission_mode": definition.permission_mode,
+            "source": definition.source,
+        }
+
+    @staticmethod
+    def _definition_from_resume_spec(spec: Any) -> Any | None:
+        """Validate a persisted descriptor, failing closed on legacy/corrupt data."""
+        from valecode.agents.parser import (
+            AgentDef,
+            VALID_PERMISSION_MODES,
+        )
+
+        if not isinstance(spec, dict) or spec.get("version") != RESUME_SPEC_VERSION:
+            return None
+        strings = (
+            "agent_type",
+            "when_to_use",
+            "system_prompt",
+            "model",
+            "permission_mode",
+            "source",
+        )
+        if any(not isinstance(spec.get(key), str) for key in strings):
+            return None
+        if not spec["agent_type"] or not spec["model"]:
+            return None
+        if spec["source"] not in {"builtin", "project", "user", "plugin"}:
+            return None
+        if spec["permission_mode"] not in VALID_PERMISSION_MODES:
+            return None
+        max_turns = spec.get("max_turns")
+        if isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns <= 0:
+            return None
+        tools = spec.get("tools")
+        disallowed = spec.get("disallowed_tools")
+        if (
+            not isinstance(tools, list)
+            or not all(isinstance(item, str) for item in tools)
+            or not isinstance(disallowed, list)
+            or not all(isinstance(item, str) for item in disallowed)
+        ):
+            return None
+        return AgentDef(
+            agent_type=spec["agent_type"],
+            when_to_use=spec["when_to_use"],
+            system_prompt=spec["system_prompt"],
+            tools=list(tools),
+            disallowed_tools=list(disallowed),
+            model=spec["model"],
+            max_turns=max_turns,
+            permission_mode=spec["permission_mode"],
+            background=True,
+            isolation="",
+            source=spec["source"],
+        )
+
+    def _build_recovered_agent(
+        self,
+        definition: Any,
+        *,
+        parent_run_id: str | None,
+        trace_id: str | None,
+    ) -> Agent:
+        from valecode.agents.tool_filter import resolve_agent_tools
+        from valecode.agent import Agent as AgentClass
+        from valecode.permissions import (
+            DangerousCommandDetector,
+            PathSandbox,
+            PermissionChecker,
+            PermissionMode,
+            RuleEngine,
+        )
+
+        client = self._select_llm_model(definition.model)
+        base_registry = (
+            getattr(self._parent_agent, "_full_registry", None)
+            or self._parent_agent.registry
+        )
+        filtered_registry = resolve_agent_tools(base_registry, definition, True)
+        pm_enum = getattr(
+            PermissionMode,
+            PERMISSION_MODE_MAP.get(definition.permission_mode, "DEFAULT"),
+            PermissionMode.DEFAULT,
+        )
+        checker = PermissionChecker(
+            detector=DangerousCommandDetector(),
+            sandbox=PathSandbox(self._parent_agent.work_dir),
+            rule_engine=RuleEngine(),
+            mode=pm_enum,
+        )
+        sub_agent = AgentClass(
+            client=client,
+            registry=filtered_registry,
+            protocol=self._parent_agent.protocol,
+            work_dir=self._parent_agent.work_dir,
+            max_iterations=definition.max_turns,
+            permission_checker=checker,
+            context_window=self._parent_agent.context_window,
+            instructions_content=definition.system_prompt,
+            hook_engine=self._parent_agent.hook_engine,
+        )
+        self._inherit_runtime_state(sub_agent)
+        sub_agent.agent_type = definition.agent_type
+        selected_model = getattr(client, "model", None)
+        if isinstance(selected_model, str) and selected_model:
+            sub_agent.model = selected_model
+        sub_agent.parent_run_id = parent_run_id
+        if trace_id:
+            sub_agent.trace_id = trace_id
+        trace_node = self._trace_manager.create(
+            agent_type=definition.agent_type,
+            parent_id=self._parent_agent.agent_id,
+            trace_id=sub_agent.trace_id,
+        )
+        sub_agent.agent_id = trace_node.agent_id
+        return sub_agent
+
+    def recover_persisted_tasks(self, session_id: str) -> list[str]:
+        """Adopt reconstructable queued tasks belonging to the active session."""
+        from valecode.persistence import TaskStatus
+
+        if not session_id or self._parent_agent.session_id != session_id:
+            return []
+        list_persisted = getattr(self._task_manager, "list_persisted", None)
+        adopt_persisted = getattr(self._task_manager, "adopt_persisted", None)
+        if not callable(list_persisted) or not callable(adopt_persisted):
+            return []
+
+        adopted: list[str] = []
+        for state in list_persisted(session_id=session_id):
+            if state.status != TaskStatus.QUEUED or self._task_manager.get(state.id):
+                continue
+            metadata = state.metadata if isinstance(state.metadata, dict) else {}
+            if metadata.get("resumable") is not True:
+                continue
+            definition = self._definition_from_resume_spec(
+                metadata.get("resume_spec")
+            )
+            if definition is None:
+                log.warning("Task %s has an invalid resume descriptor", state.id)
+                continue
+            trace_id = None
+            if state.run_id and self._parent_agent.run_store is not None:
+                try:
+                    parent_run = self._parent_agent.run_store.get_run(state.run_id)
+                    if parent_run is not None and parent_run.session_id == session_id:
+                        trace_id = parent_run.trace_id
+                except Exception:
+                    log.exception("Unable to restore run lineage for task %s", state.id)
+            try:
+                sub_agent = self._build_recovered_agent(
+                    definition,
+                    parent_run_id=state.run_id,
+                    trace_id=trace_id,
+                )
+                adopt_persisted(state.id, sub_agent)
+            except (KeyError, ValueError):
+                # A competing worker may have claimed or cancelled it between
+                # listing and adoption.
+                continue
+            except Exception:
+                log.exception("Unable to reconstruct background task %s", state.id)
+                continue
+            adopted.append(state.id)
+        return adopted
 
     async def execute(self, params: BaseModel) -> ToolResult:
         p: AgentToolParams = params  # type: ignore[assignment]
@@ -240,6 +422,9 @@ class AgentTool(Tool):
         )
         self._inherit_runtime_state(sub_agent)
         sub_agent.agent_type = definition.agent_type
+        selected_model = getattr(client, "model", None)
+        if isinstance(selected_model, str) and selected_model:
+            sub_agent.model = selected_model
 
         # fork 子 agent 继承父 agent 的替换状态，确保共享的 tool_use_id 做出一致的
         # 决策——这样父子共享的 prompt cache 前缀才能保持字节级一致
@@ -267,6 +452,11 @@ class AgentTool(Tool):
                 task="" if is_fork else p.prompt,
                 name=agent_name,
                 fork_conversation=conversation if is_fork else None,
+                resume_spec=(
+                    None
+                    if is_fork
+                    else self._resume_spec(definition, p.model)
+                ),
             )
             return ToolResult(
                 output=f"Sub-agent launched in background.\n"
@@ -539,6 +729,10 @@ class AgentTool(Tool):
         model_override = params.model or (
             definition.model if definition.model != "inherit" else None
         )
+
+        return self._select_llm_model(model_override)
+
+    def _select_llm_model(self, model_override: str | None) -> LLMClient:
 
         if model_override and model_override != "inherit":
             client = self._create_client_for_model(model_override)

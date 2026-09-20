@@ -75,9 +75,18 @@ async def handle_session(ctx: CommandContext) -> None:
         if ctx.agent:
             ctx.agent._loop_count = 0
         await ctx.config["render_restored"](result.messages)
+        recover_tasks = ctx.config.get("recover_tasks")
+        recovered: list[str] = []
+        if callable(recover_tasks):
+            recovered = recover_tasks(result.session.session_id)
         ctx.ui.add_system_message(
             f"会话已恢复: {session_id} ({result.session.meta.message_count} msgs)"
         )
+        if recovered:
+            ctx.ui.add_system_message(
+                f"已安全续跑 {len(recovered)} 个后台任务: "
+                + ", ".join(recovered)
+            )
 
 
     elif sub == "new":
@@ -118,4 +127,3 @@ SESSION_COMMAND = Command(
     type=CommandType.LOCAL,
     handler=handle_session,
 )
-

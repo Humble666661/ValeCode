@@ -282,6 +282,16 @@ background_tasks:
 基础间隔。大结果的完整文件默认保留 30 天，过期后删除完整文件但保留数据库中的
 截断摘要。TUI、`-p` 和 Remote 使用同一组配置。
 
+普通“定义型”后台子 Agent 会额外保存不含凭据的重建描述。进程异常退出或正常关闭
+后，先使用 `/session resume <id>` 恢复原会话；ValeCode 会在历史消息恢复完成后自动
+领取该会话中可安全重建的 queued 任务。正常关闭不会消耗任务原有的失败重试预算，
+用户通过 `/tasks cancel <id>` 主动取消则是终态，不会再次领取。
+
+对话 fork、Agent Team、Worktree 隔离任务、旧版本任务以及损坏的重建描述不会自动
+续跑，因为它们缺少可验证的完整运行现场。这些记录仍可通过 `/tasks` 查看或取消；
+ValeCode 不会使用主 Agent 或其他会话上下文盲目代跑。恢复后的工具集合仍以当前
+Registry 为能力上限，并继续经过权限、危险命令和沙箱检查。
+
 ## 开发与测试
 
 ```bash
@@ -289,7 +299,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **800 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **811 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

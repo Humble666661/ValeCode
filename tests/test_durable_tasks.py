@@ -18,6 +18,7 @@ def make_agent(session_id: str, result: str = "done"):
     agent = MagicMock()
     agent.session_id = session_id
     agent._current_run_id = None
+    agent.parent_run_id = None
     agent.team_name = ""
     agent._team_manager = None
     agent.total_input_tokens = 12
@@ -151,6 +152,170 @@ async def test_durable_manager_retries_and_persists_result(tmp_path):
         "succeeded",
     ]
     assert manager.get(task_id).status == "completed"
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_launch_persists_only_explicit_reconstruction_descriptor(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    manager = DurableTaskManager(sessions.task_store)
+    descriptor = {
+        "version": 1,
+        "agent_type": "Explore",
+        "model": "inherit",
+    }
+
+    resumable_id = manager.launch(
+        make_agent(session.session_id),
+        "inspect",
+        resume_spec=descriptor,
+    )
+    forked_id = manager.launch(
+        make_agent(session.session_id),
+        "",
+        fork_conversation=SimpleNamespace(),
+        resume_spec=descriptor,
+    )
+
+    resumable = sessions.task_store.get(resumable_id)
+    forked = sessions.task_store.get(forked_id)
+    assert resumable.metadata["resumable"] is True
+    assert resumable.metadata["resume_spec"] == descriptor
+    assert forked.metadata["resumable"] is False
+    assert forked.metadata["resume_spec"] is None
+    assert "fork conversation" in forked.metadata["resume_reason"]
+    await manager.shutdown()
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_graceful_shutdown_requeues_resumable_task_and_preserves_budget(
+    tmp_path,
+):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    started = asyncio.Event()
+    agent = make_agent(session.session_id)
+
+    async def wait_forever(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    agent.run_to_completion = wait_forever
+    first_manager = DurableTaskManager(sessions.task_store, worker_id="worker-one")
+    task_id = first_manager.launch(
+        agent,
+        "resume after restart",
+        max_attempts=1,
+        resume_spec={"version": 1, "agent_type": "Explore"},
+    )
+    await started.wait()
+
+    await first_manager.shutdown()
+
+    queued = sessions.task_store.get(task_id)
+    assert queued.status == TaskStatus.QUEUED
+    assert queued.attempt_count == 1
+    assert queued.max_attempts == 2
+    assert queued.lease_owner is None
+    assert [attempt.status for attempt in sessions.task_store.list_attempts(task_id)] == [
+        "interrupted"
+    ]
+
+    second_manager = DurableTaskManager(sessions.task_store, worker_id="worker-two")
+    resumed_agent = make_agent(session.session_id, "finished after restart")
+    second_manager.adopt_persisted(task_id, resumed_agent)
+    await second_manager._async_tasks[task_id]
+
+    completed = sessions.task_store.get(task_id)
+    assert completed.status == TaskStatus.SUCCEEDED
+    assert completed.attempt_count == 2
+    assert [attempt.status for attempt in sessions.task_store.list_attempts(task_id)] == [
+        "interrupted",
+        "succeeded",
+    ]
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_user_cancel_does_not_requeue_resumable_task(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    started = asyncio.Event()
+    agent = make_agent(session.session_id)
+
+    async def wait_forever(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    agent.run_to_completion = wait_forever
+    manager = DurableTaskManager(sessions.task_store)
+    task_id = manager.launch(
+        agent,
+        "cancel me",
+        resume_spec={"version": 1, "agent_type": "Explore"},
+    )
+    await started.wait()
+
+    assert manager.cancel(task_id) is True
+    await manager._async_tasks[task_id]
+
+    assert sessions.task_store.get(task_id).status == TaskStatus.CANCELLED
+    assert sessions.task_store.list_attempts(task_id)[0].status == "cancelled"
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_before_first_timeslice_keeps_only_resumable_task(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    manager = DurableTaskManager(sessions.task_store)
+    resumable_id = manager.launch(
+        make_agent(session.session_id),
+        "resume later",
+        resume_spec={"version": 1},
+    )
+    transient_id = manager.launch(
+        make_agent(session.session_id),
+        "cannot reconstruct",
+    )
+
+    await manager.shutdown()
+
+    assert sessions.task_store.get(resumable_id).status == TaskStatus.QUEUED
+    assert sessions.task_store.get(transient_id).status == TaskStatus.CANCELLED
+    assert manager._async_tasks == {}
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_launch_links_task_to_parent_run(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    parent_run = sessions.run_store.create_run(
+        session.session_id,
+        input="lead request",
+        agent_id="lead",
+        trace_id="trace-parent",
+    )
+    agent = make_agent(session.session_id)
+    agent.parent_run_id = parent_run.id
+    started = asyncio.Event()
+
+    async def wait_forever(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    agent.run_to_completion = wait_forever
+    manager = DurableTaskManager(sessions.task_store)
+
+    task_id = manager.launch(agent, "child work")
+    await started.wait()
+
+    assert sessions.task_store.get(task_id).run_id == parent_run.id
+    manager.cancel(task_id)
+    await manager._async_tasks[task_id]
     session.close()
 
 

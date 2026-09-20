@@ -50,7 +50,13 @@ class TaskManager:
         task: str,
         name: str = "",
         fork_conversation: Any = None,
+        *,
+        resume_spec: dict[str, Any] | None = None,
     ) -> str:
+        # The in-memory manager does not need a reconstruction descriptor, but
+        # accepts it so callers can use the same launch contract as the durable
+        # manager.
+        del resume_spec
         task_id = uuid.uuid4().hex[:8]
         bg = BackgroundTask(
             id=task_id,
@@ -204,8 +210,23 @@ class TaskManager:
 
     async def shutdown(self) -> None:
         """Cancel and await every process-local background task."""
-        handles = [task for task in self._async_tasks.values() if not task.done()]
+        active = [
+            (task_id, task)
+            for task_id, task in self._async_tasks.items()
+            if not task.done()
+        ]
+        handles = [task for _, task in active]
         for task in handles:
             task.cancel()
         if handles:
             await asyncio.gather(*handles, return_exceptions=True)
+        # A task cancelled before its coroutine gets a first timeslice cannot
+        # execute its ``finally`` block, so clean those handles explicitly.
+        for task_id, task in active:
+            if task.done():
+                self._async_tasks.pop(task_id, None)
+                bg = self._tasks.get(task_id)
+                if bg is not None and bg.status == "running":
+                    bg.status = "cancelled"
+                    bg.result = "Task was cancelled"
+                    bg.end_time = time.monotonic()

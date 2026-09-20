@@ -51,7 +51,7 @@ from valecode.commands.handlers.tasks import create_tasks_command
 from valecode.commands.handlers.trace import create_trace_command
 from valecode.commands.parser import parse_command
 from valecode.config import MCPServerConfig, ProviderConfig, SandboxAppConfig
-from valecode.conversation import ConversationManager
+from valecode.conversation import ConversationManager, Message
 from valecode.hooks import HookEngine
 from valecode.mcp import MCPManager
 from valecode.memory import MemoryManager, load_instructions
@@ -147,6 +147,7 @@ class RemoteServer:
 
         # 子 Agent / 后台任务
         self.agent_loader: AgentLoader | None = None
+        self.agent_tool: AgentTool | None = None
         self.task_manager: DurableTaskManager | None = None
         self.trace_manager = TraceManager()
 
@@ -421,14 +422,15 @@ class RemoteServer:
             enable_verification=self._enable_verification_agent,
         )
         self.agent_loader.load_all()
-        self.registry.register(AgentTool(
+        self.agent_tool = AgentTool(
             agent_loader=self.agent_loader,
             task_manager=self.task_manager,
             trace_manager=self.trace_manager,
             parent_agent=self.agent,
             enable_fork=self._enable_fork,
             provider_config=provider,
-        ))
+        )
+        self.registry.register(self.agent_tool)
 
         agent_catalog = self.agent_loader.list_agents()
         if agent_catalog:
@@ -520,6 +522,13 @@ class RemoteServer:
             return
 
         completed = self.task_manager.poll_completed()
+        if not completed:
+            return
+        completed = [
+            task
+            for task in completed
+            if task.agent.session_id == self.session_id
+        ]
         if not completed:
             return
 
@@ -854,10 +863,52 @@ class RemoteServer:
             ui=self,  # type: ignore[arg-type]
             config={
                 "registry": self.command_registry,
+                "set_session": self._set_session,
+                "set_conversation": self._set_conversation,
+                "clear_chat": self._clear_chat,
+                "render_restored": self._render_restored_messages,
+                "recover_tasks": self._recover_session_tasks,
                 "skill_loader": self.skill_loader,
                 "skill_executor": self.skill_executor,
             },
         )
+
+    def _set_session(self, session: Session) -> None:
+        self.session = session
+        self.session_id = session.session_id
+        if self.registry is not None:
+            self.registry.bind_session(session.session_id)
+        if self.agent is not None:
+            self.agent.session_id = session.session_id
+            if self.agent.permission_checker is not None:
+                self.agent.permission_checker.bind_session(session.session_id)
+
+    def _set_conversation(self, conversation: ConversationManager) -> None:
+        self.conversation = conversation
+
+    def _clear_chat(self) -> None:
+        asyncio.create_task(self._broadcast({"type": "clear", "data": None}))
+
+    async def _render_restored_messages(self, messages: list[Message]) -> None:
+        await self._broadcast({"type": "clear", "data": None})
+        for message in messages:
+            if message.tool_results or not message.content:
+                continue
+            if message.role == "user":
+                event_type = "replay_user"
+            elif message.role == "assistant":
+                event_type = "replay_assistant"
+            else:
+                continue
+            await self._broadcast({
+                "type": event_type,
+                "data": {"content": message.content},
+            })
+
+    def _recover_session_tasks(self, session_id: str) -> list[str]:
+        if self.agent_tool is None:
+            return []
+        return self.agent_tool.recover_persisted_tasks(session_id)
 
     async def _handle_compact(self) -> None:
         """处理 /compact 命令。"""

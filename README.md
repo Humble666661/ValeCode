@@ -15,7 +15,7 @@ Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
 - **安全恢复**：启动时扫描未完成执行，通过幂等键、文件状态检查和人工确认决定
   重试、复用或停止。
 - **耐久后台任务**：支持依赖关系、lease、heartbeat、失败重试、worker 接管以及
-  全局和 Team 级并发控制。
+  全局和 Team 级并发控制；`TaskDispatch` 可把共享看板任务显式链接到执行实例。
 - **可组合工具系统**：Built-in、Plugin、MCP 和 Session 四层 Registry，配合
   Skills、Hooks、权限规则和资源生命周期管理。
 - **多 Agent 协作**：支持 Sub-Agent、后台 Agent、Agent Team、结构化邮箱事件以及
@@ -299,7 +299,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **835 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **841 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

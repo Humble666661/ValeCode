@@ -470,6 +470,65 @@ class TaskStore:
             ).fetchone()
         return self._from_row(updated)
 
+    def finish_board_claim(
+        self,
+        task_id: str,
+        assignee: str,
+        *,
+        succeeded: bool,
+    ) -> TaskState | None:
+        """Compare-and-set a shared board claim to its terminal outcome."""
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Task not found: {task_id}")
+            metadata = load_json(row["metadata_json"], {})
+            if metadata.get("kind") != "shared_team_task":
+                raise ValueError("Only shared team tasks can finish a board claim")
+            data = load_json(row["input_json"], {})
+            if (
+                data.get("board_status", "pending") != "in_progress"
+                or data.get("assignee", "") != assignee
+            ):
+                return None
+            board_status = "completed" if succeeded else "blocked"
+            target = TaskStatus.SUCCEEDED if succeeded else TaskStatus.QUEUED
+            data["board_status"] = board_status
+            if succeeded:
+                data["progress"] = 100
+            now = utc_now()
+            connection.execute(
+                """
+                UPDATE tasks SET status = ?, input_json = ?, updated_at = ?,
+                    completed_at = ?, version = version + 1 WHERE id = ?
+                """,
+                (
+                    target.value,
+                    dump_json(data),
+                    now,
+                    now if succeeded else None,
+                    task_id,
+                ),
+            )
+            self.events._append(
+                connection,
+                "task.board_claim_finished",
+                session_id=row["session_id"],
+                run_id=row["run_id"],
+                task_id=task_id,
+                payload={
+                    "assignee": assignee,
+                    "from": "in_progress",
+                    "to": board_status,
+                },
+            )
+            updated = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return self._from_row(updated)
+
     def dependencies_ready(self, task_id: str) -> bool:
         with self.database.reader() as connection:
             row = connection.execute(

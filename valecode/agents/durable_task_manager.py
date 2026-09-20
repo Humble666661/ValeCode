@@ -187,6 +187,8 @@ class DurableTaskManager(TaskManager):
         dependencies: list[str] | None = None,
         max_attempts: int = 3,
         resume_spec: dict[str, Any] | None = None,
+        board_team_name: str = "",
+        board_task_id: str = "",
     ) -> str:
         parent_run_id = getattr(agent, "parent_run_id", None)
         task_run_id = (
@@ -214,6 +216,8 @@ class DurableTaskManager(TaskManager):
                 agent=agent,
                 task=task,
                 status="queued",
+                board_team_name=board_team_name,
+                board_task_id=board_task_id,
             )
             self._tasks[task_id] = bg
             resumable = (
@@ -230,11 +234,16 @@ class DurableTaskManager(TaskManager):
                 else:
                     resume_reason = "no reconstruction descriptor was supplied"
             self.task_store.create(
-                {"task": task, "name": bg.name},
+                {
+                    "task": task,
+                    "name": bg.name,
+                    "board_team_name": board_team_name,
+                    "board_task_id": board_task_id,
+                },
                 task_id=task_id,
                 session_id=agent.session_id or None,
                 run_id=task_run_id,
-                team_name=agent.team_name or None,
+                team_name=agent.team_name or board_team_name or None,
                 max_attempts=max_attempts,
                 dependencies=dependencies,
                 metadata={
@@ -247,6 +256,8 @@ class DurableTaskManager(TaskManager):
                     "resumable": resumable,
                     "resume_spec": resume_spec if resumable else None,
                     "resume_reason": resume_reason,
+                    "board_team_name": board_team_name,
+                    "board_task_id": board_task_id,
                 },
             )
             handle = asyncio.create_task(self._run_durable(task_id, fork_conversation))
@@ -289,7 +300,9 @@ class DurableTaskManager(TaskManager):
         bg = self._tasks.get(task_id)
         if bg is None:
             return
-        team_name = getattr(bg.agent, "team_name", "") or ""
+        team_name = (
+            getattr(bg.agent, "team_name", "") or bg.board_team_name or ""
+        )
         team_capacity = None
         if team_name:
             team_capacity = self._team_capacity.setdefault(
@@ -359,6 +372,7 @@ class DurableTaskManager(TaskManager):
                 bg.result = result
                 bg.status = "completed"
                 self._succeed(bg)
+                self._sync_board_task(bg, "completed")
                 await self._teammate_idle_loop(bg)
                 return
             except asyncio.CancelledError:
@@ -466,6 +480,7 @@ class DurableTaskManager(TaskManager):
             return
         bg.status = "cancelled"
         bg.result = "Task was cancelled"
+        self._sync_board_task(bg, "cancelled")
         state = self.task_store.get(bg.id)
         if state is None or state.status == TaskStatus.CANCELLED:
             return
@@ -490,6 +505,7 @@ class DurableTaskManager(TaskManager):
         state = self.task_store.get(bg.id)
         if state is None:
             bg.status = "failed"
+            self._sync_board_task(bg, "failed")
             return False
         self.task_store.finish_attempt(
             bg.id, state.attempt_count, status="failed", error=str(exc)
@@ -507,6 +523,7 @@ class DurableTaskManager(TaskManager):
                 input_tokens=bg.agent.total_input_tokens,
                 output_tokens=bg.agent.total_output_tokens,
             )
+            self._sync_board_task(bg, "failed")
             return False
         delay = self._retry_delay(state.attempt_count)
         next_retry = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(
@@ -546,6 +563,8 @@ class DurableTaskManager(TaskManager):
             agent=agent,
             task=str(state.input.get("task", "")),
             status="queued",
+            board_team_name=str(state.input.get("board_team_name", "")),
+            board_task_id=str(state.input.get("board_task_id", "")),
         )
         self._tasks[task_id] = bg
         handle = asyncio.create_task(self._run_durable(task_id))

@@ -383,7 +383,7 @@ async def _run_prompt(
         enable_coordinator_mode=config.enable_coordinator_mode,
     ))
     registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
-    for task_tool in build_lead_task_tools(team_manager, agent.agent_id):
+    for task_tool in build_lead_task_tools(team_manager, agent.agent_id, agent_tool):
         registry.register(task_tool)
 
     def drain_notifications() -> list[str]:

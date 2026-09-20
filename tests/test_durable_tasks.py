@@ -554,6 +554,67 @@ async def test_periodic_maintenance_recovers_later_expired_lease(tmp_path):
     session.close()
 
 
+@pytest.mark.asyncio
+async def test_linked_background_execution_completes_shared_board_task(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    shared = board.create("Implement")
+    board.claim(shared.id, "worker")
+    team_manager = MagicMock()
+    team_manager.get_task_store.return_value = board
+    agent = make_agent(session.session_id, "implemented")
+    agent._team_manager = team_manager
+    manager = DurableTaskManager(sessions.task_store)
+
+    execution_id = manager.launch(
+        agent,
+        "Implement the feature",
+        name="worker",
+        max_attempts=1,
+        board_team_name="alpha",
+        board_task_id=shared.id,
+    )
+    await manager._async_tasks[execution_id]
+
+    assert board.get(shared.id).status == "completed"
+    assert board.get(shared.id).progress == 100
+    execution = sessions.task_store.get(execution_id)
+    assert execution.team_name == "alpha"
+    assert execution.input["board_team_name"] == "alpha"
+    assert execution.input["board_task_id"] == shared.id
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_linked_background_final_failure_blocks_shared_task(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    session = sessions.create()
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    shared = board.create("Implement")
+    board.claim(shared.id, "worker")
+    team_manager = MagicMock()
+    team_manager.get_task_store.return_value = board
+    agent = make_agent(session.session_id)
+    agent._team_manager = team_manager
+    agent.run_to_completion = AsyncMock(side_effect=RuntimeError("boom"))
+    manager = DurableTaskManager(sessions.task_store)
+
+    execution_id = manager.launch(
+        agent,
+        "Implement the feature",
+        name="worker",
+        max_attempts=1,
+        board_team_name="alpha",
+        board_task_id=shared.id,
+    )
+    await manager._async_tasks[execution_id]
+
+    assert board.get(shared.id).status == "blocked"
+    assert sessions.task_store.get(execution_id).status == TaskStatus.FAILED
+    session.close()
+
+
 def test_team_task_board_uses_sqlite_and_dependency_relations(tmp_path):
     sessions = SessionManager(str(tmp_path))
     board = DurableSharedTaskStore(sessions.task_store, "alpha")
@@ -632,3 +693,14 @@ def test_durable_team_task_persists_priority_and_progress(tmp_path):
 
     completed = board.update(task.id, status="completed")
     assert completed.progress == 100
+
+
+def test_durable_stale_claim_result_is_ignored(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    task = board.create("Race")
+    board.claim(task.id, "worker")
+    board.update(task.id, status="completed")
+
+    assert board.finish_claim(task.id, "worker", succeeded=False) is False
+    assert board.get(task.id).status == "completed"

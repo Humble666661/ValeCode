@@ -11,6 +11,7 @@ from valecode.tools.task_list import TaskListParams, TaskListTool
 from valecode.tools.task_update import TaskUpdateParams, TaskUpdateTool
 
 if TYPE_CHECKING:
+    from valecode.tools.agent_tool import AgentTool
     from valecode.teams.manager import TeamManager
 
 
@@ -163,10 +164,16 @@ class LeadTaskUpdateTool(_LeadTaskTool):
 def build_lead_task_tools(
     team_manager: TeamManager,
     lead_agent_id: str,
+    agent_tool: AgentTool | None = None,
 ) -> list[Tool]:
-    return [
+    tools: list[Tool] = [
         LeadTaskCreateTool(team_manager, lead_agent_id),
         LeadTaskGetTool(team_manager, lead_agent_id),
         LeadTaskListTool(team_manager, lead_agent_id),
         LeadTaskUpdateTool(team_manager, lead_agent_id),
     ]
+    if agent_tool is not None:
+        from valecode.tools.task_dispatch import TaskDispatchTool
+
+        tools.append(TaskDispatchTool(team_manager, lead_agent_id, agent_tool))
+    return tools

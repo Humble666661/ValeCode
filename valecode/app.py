@@ -943,7 +943,7 @@ class ValeCodeApp(App):
         )
         self.registry.register(team_delete_tool)
         for task_tool in build_lead_task_tools(
-            self.team_manager, self.agent.agent_id
+            self.team_manager, self.agent.agent_id, self.agent_tool
         ):
             self.registry.register(task_tool)
 

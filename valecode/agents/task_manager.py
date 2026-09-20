@@ -33,6 +33,9 @@ class BackgroundTask:
     end_time: float | None = None
     cancel: Callable[[], None] | None = None
     progress: ProgressInfo = field(default_factory=ProgressInfo)
+    board_team_name: str = ""
+    board_task_id: str = ""
+    board_synced: bool = False
 
 
 class TaskManager:
@@ -52,6 +55,8 @@ class TaskManager:
         fork_conversation: Any = None,
         *,
         resume_spec: dict[str, Any] | None = None,
+        board_team_name: str = "",
+        board_task_id: str = "",
     ) -> str:
         # The in-memory manager does not need a reconstruction descriptor, but
         # accepts it so callers can use the same launch contract as the durable
@@ -63,6 +68,8 @@ class TaskManager:
             name=name or task_id,
             agent=agent,
             task=task,
+            board_team_name=board_team_name,
+            board_task_id=board_task_id,
         )
         self._tasks[task_id] = bg
 
@@ -89,6 +96,7 @@ class TaskManager:
                 result = await bg.agent.run_to_completion(bg.task)
             bg.result = result
             bg.status = "completed"
+            self._sync_board_task(bg, "completed")
 
             if bg.agent.team_name and bg.agent._team_manager:
                 mailbox = bg.agent._team_manager.get_mailbox(bg.agent.team_name)
@@ -123,16 +131,56 @@ class TaskManager:
         except asyncio.CancelledError:
             bg.status = "cancelled"
             bg.result = "Task was cancelled"
+            self._sync_board_task(bg, "cancelled")
         except Exception as e:
             log.error("Background task %s failed: %s", task_id, e)
             bg.status = "failed"
             bg.result = f"Error: {e}"
+            self._sync_board_task(bg, "failed")
         finally:
             bg.end_time = time.monotonic()
             bg.progress.input_tokens = bg.agent.total_input_tokens
             bg.progress.output_tokens = bg.agent.total_output_tokens
             self._async_tasks.pop(task_id, None)
             await self._notify_queue.put(task_id)
+
+    @staticmethod
+    def _sync_board_task(bg: BackgroundTask, outcome: str) -> None:
+        """Project a terminal execution outcome back to its shared board item."""
+        if bg.board_synced or not bg.board_team_name or not bg.board_task_id:
+            return
+        manager = getattr(bg.agent, "_team_manager", None)
+        if manager is None:
+            log.error(
+                "Cannot sync board task %s/%s: TeamManager unavailable",
+                bg.board_team_name,
+                bg.board_task_id,
+            )
+            return
+        try:
+            store = manager.get_task_store(bg.board_team_name)
+            if store is None:
+                raise ValueError(f"Team '{bg.board_team_name}' task store not found")
+            committed = store.finish_claim(
+                bg.board_task_id,
+                bg.name,
+                succeeded=outcome == "completed",
+            )
+            if not committed:
+                log.warning(
+                    "Ignored stale board result for %s/%s owned by %s",
+                    bg.board_team_name,
+                    bg.board_task_id,
+                    bg.name,
+                )
+            bg.board_synced = True
+        except Exception:
+            log.exception(
+                "Unable to sync board task %s/%s after %s",
+                bg.board_team_name,
+                bg.board_task_id,
+                outcome,
+            )
 
 
     def adopt_running(
@@ -193,6 +241,9 @@ class TaskManager:
         async_task = self._async_tasks.get(task_id)
         if async_task and not async_task.done():
             async_task.cancel()
+            bg.status = "cancelled"
+            bg.result = "Task was cancelled"
+            self._sync_board_task(bg, "cancelled")
             return True
         return False
 
@@ -230,3 +281,4 @@ class TaskManager:
                     bg.status = "cancelled"
                     bg.result = "Task was cancelled"
                     bg.end_time = time.monotonic()
+                    self._sync_board_task(bg, "cancelled")

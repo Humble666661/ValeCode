@@ -22,6 +22,7 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "TaskGet",
     "TaskList",
     "TaskUpdate",
+    "TaskDispatch",
 })
 
 CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
@@ -75,6 +76,7 @@ COORDINATOR_MODE_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "TaskGet",
     "TaskList",
     "TaskUpdate",
+    "TaskDispatch",
     "TaskStop",
     "SyntheticOutput",
     "TeamCreate",

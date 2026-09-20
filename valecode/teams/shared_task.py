@@ -383,6 +383,23 @@ class SharedTaskStore:
         """Atomically claim one ready task for *assignee*."""
         return self._mutate(lambda: self._claim_loaded(task_id, assignee))
 
+    def finish_claim(self, task_id: str, assignee: str, *, succeeded: bool) -> bool:
+        """Commit a terminal outcome only while *assignee* still owns the task."""
+        def _finish() -> bool:
+            task = self._tasks.get(task_id)
+            if (
+                task is None
+                or task.status != "in_progress"
+                or task.assignee != assignee
+            ):
+                return False
+            task.status = "completed" if succeeded else "blocked"
+            if succeeded:
+                task.progress = 100
+            return True
+
+        return bool(self._mutate(_finish))
+
     def init_empty(self) -> None:
         def _clear() -> None:
             self._tasks.clear()
@@ -609,6 +626,12 @@ class DurableSharedTaskStore:
     def claim(self, task_id: str, assignee: str) -> SharedTask:
         state = self._store.claim_board_task(self._database_id(task_id), assignee)
         return self._to_shared(state)
+
+    def finish_claim(self, task_id: str, assignee: str, *, succeeded: bool) -> bool:
+        state = self._store.finish_board_claim(
+            self._database_id(task_id), assignee, succeeded=succeeded
+        )
+        return state is not None
 
     def init_empty(self) -> None:
         # Team names are unique, so a newly created team has no matching rows.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -97,6 +98,23 @@ class AgentTool(Tool):
         self._worktree_manager = worktree_manager
         self._team_manager = team_manager
         self.query_source: str = ""
+        self._board_dispatch: ContextVar[tuple[str, str]] = ContextVar(
+            f"board_dispatch_{id(self)}", default=("", "")
+        )
+
+    async def execute_for_board(
+        self,
+        params: AgentToolParams,
+        *,
+        team_name: str,
+        task_id: str,
+    ) -> ToolResult:
+        """Launch one regular background Agent linked to a shared board task."""
+        token = self._board_dispatch.set((team_name, task_id))
+        try:
+            return await self.execute(params)
+        finally:
+            self._board_dispatch.reset(token)
 
     def _inherit_runtime_state(self, sub_agent: Agent) -> None:
         """Attach a child to the parent's durable run and trace context."""
@@ -233,6 +251,7 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
         )
         self._inherit_runtime_state(sub_agent)
+        sub_agent._team_manager = self._team_manager
         sub_agent.agent_type = definition.agent_type
         selected_model = getattr(client, "model", None)
         if isinstance(selected_model, str) and selected_model:
@@ -447,6 +466,9 @@ class AgentTool(Tool):
         if is_background:
             if is_fork:
                 sub_agent._fork_conversation = conversation
+            board_team_name, board_task_id = self._board_dispatch.get()
+            if board_task_id:
+                sub_agent._team_manager = self._team_manager
             task_id = self._task_manager.launch(
                 agent=sub_agent,
                 task="" if is_fork else p.prompt,
@@ -457,6 +479,8 @@ class AgentTool(Tool):
                     if is_fork
                     else self._resume_spec(definition, p.model)
                 ),
+                board_team_name=board_team_name,
+                board_task_id=board_task_id,
             )
             return ToolResult(
                 output=f"Sub-agent launched in background.\n"

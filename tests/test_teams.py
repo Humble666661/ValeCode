@@ -51,6 +51,8 @@ from valecode.tools.lead_tasks import (
     LeadTaskUpdateParams,
     LeadTaskUpdateTool,
 )
+from valecode.tools.base import ToolResult
+from valecode.tools.task_dispatch import TaskDispatchParams, TaskDispatchTool
 from valecode.agents.tool_filter import (
     COORDINATOR_MODE_ALLOWED_TOOLS,
     IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
@@ -383,6 +385,16 @@ class TestSharedTaskStore:
         with pytest.raises(ValueError, match="between 0 and 100"):
             store.update(task.id, progress=101)
 
+    def test_stale_claim_result_cannot_overwrite_newer_board_state(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        task = store.create(title="Race")
+        store.claim(task.id, "worker")
+        store.update(task.id, status="completed")
+
+        assert store.finish_claim(task.id, "worker", succeeded=False) is False
+        assert store.get(task.id).status == "completed"
+
     @pytest.mark.asyncio
     async def test_task_update_claims_only_for_current_teammate(self, tmp_dir):
         store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
@@ -463,6 +475,66 @@ class TestSharedTaskStore:
         )
         assert result.is_error is True
         assert "not the lead" in result.output
+
+    @pytest.mark.asyncio
+    async def test_lead_dispatch_atomically_links_ready_task(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        task = store.create(title="Implement", description="Build the feature")
+        manager = MagicMock()
+        manager.get_team.return_value = AgentTeam(
+            name="alpha", lead_agent_id="lead-1"
+        )
+        manager.get_task_store.return_value = store
+        agent_tool = MagicMock()
+        agent_tool.execute_for_board = AsyncMock(
+            return_value=ToolResult(output="Task ID: bg-1")
+        )
+        tool = TaskDispatchTool(manager, "lead-1", agent_tool)
+
+        result = await tool.execute(
+            TaskDispatchParams(
+                team_name="alpha",
+                task_id=task.id,
+                subagent_type="general-purpose",
+                name="implementer",
+            )
+        )
+
+        assert result.is_error is False
+        claimed = store.get(task.id)
+        assert claimed.status == "in_progress"
+        assert claimed.assignee == "implementer"
+        _, kwargs = agent_tool.execute_for_board.await_args
+        assert kwargs == {"team_name": "alpha", "task_id": task.id}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_rolls_back_claim_when_agent_launch_fails(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        task = store.create(title="Implement")
+        manager = MagicMock()
+        manager.get_team.return_value = AgentTeam(
+            name="alpha", lead_agent_id="lead-1"
+        )
+        manager.get_task_store.return_value = store
+        agent_tool = MagicMock()
+        agent_tool.execute_for_board = AsyncMock(
+            return_value=ToolResult(output="Unknown agent type", is_error=True)
+        )
+
+        result = await TaskDispatchTool(manager, "lead-1", agent_tool).execute(
+            TaskDispatchParams(
+                team_name="alpha",
+                task_id=task.id,
+                subagent_type="missing",
+            )
+        )
+
+        assert result.is_error is True
+        restored = store.get(task.id)
+        assert restored.status == "pending"
+        assert restored.assignee == ""
 
 # =====================================================================
 # 3. Mailbox

@@ -330,6 +330,32 @@ class TestSharedTaskStore:
         assert persisted is not None
         assert persisted.assignee == winners[0]
 
+    def test_dependency_relations_are_bidirectional_and_acyclic(self, tmp_dir):
+        store = SharedTaskStore(Path(tmp_dir) / "tasks.json")
+        store.init_empty()
+        first = store.create(title="First")
+        second = store.create(title="Second", blocked_by=[first.id])
+
+        assert store.get(first.id).blocks == [second.id]
+        with pytest.raises(ValueError, match="cannot contain a cycle"):
+            store.update(first.id, add_blocked_by=[second.id])
+        with pytest.raises(ValueError, match="Unknown shared task dependencies"):
+            store.create(title="Broken", blocked_by=["999"])
+        assert [task.id for task in store.list_tasks()] == [first.id, second.id]
+
+    def test_concurrent_create_preserves_every_task(self, tmp_dir):
+        path = Path(tmp_dir) / "tasks.json"
+        SharedTaskStore(path).init_empty()
+
+        def create(index: int) -> str:
+            return SharedTaskStore(path).create(title=f"Task {index}").id
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            ids = list(pool.map(create, range(20)))
+
+        assert len(set(ids)) == 20
+        assert len(SharedTaskStore(path).list_tasks()) == 20
+
     @pytest.mark.asyncio
     async def test_task_update_claims_only_for_current_teammate(self, tmp_dir):
         store = SharedTaskStore(Path(tmp_dir) / "tasks.json")

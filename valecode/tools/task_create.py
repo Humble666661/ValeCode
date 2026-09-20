@@ -43,14 +43,17 @@ class TaskCreateTool(Tool):
         if store is None:
             return ToolResult(output=f"Task store not found for team '{self._team_name}'", is_error=True)
 
-        task = store.create(
-            title=p.title,
-            description=p.description,
-            assignee=p.assignee,
-            blocks=p.blocks,
-            blocked_by=p.blocked_by,
-            created_by=self._agent_name,
-        )
+        try:
+            task = store.create(
+                title=p.title,
+                description=p.description,
+                assignee=p.assignee,
+                blocks=p.blocks,
+                blocked_by=p.blocked_by,
+                created_by=self._agent_name,
+            )
+        except (KeyError, TimeoutError, ValueError) as exc:
+            return ToolResult(output=str(exc), is_error=True)
 
         return ToolResult(
             output=(

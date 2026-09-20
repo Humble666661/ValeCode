@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -588,3 +589,31 @@ def test_durable_team_task_claim_is_atomic_and_dependency_aware(tmp_path):
 
     with pytest.raises(ValueError, match="already claimed by 'alice'"):
         board.claim(implementation.id, "bob")
+
+
+def test_durable_team_task_rejects_missing_and_cyclic_dependencies(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    first = board.create("First")
+    second = board.create("Second", blocked_by=[first.id])
+
+    with pytest.raises(ValueError, match="cannot contain a cycle"):
+        board.update(first.id, add_blocked_by=[second.id])
+    with pytest.raises(ValueError, match="Unknown shared task dependencies"):
+        board.create("Broken", blocked_by=["999"])
+    assert [task.id for task in board.list_tasks()] == [first.id, second.id]
+
+
+def test_durable_team_task_allocates_unique_ids_concurrently(tmp_path):
+    sessions = SessionManager(str(tmp_path))
+
+    def create(index: int) -> str:
+        board = DurableSharedTaskStore(sessions.task_store, "alpha")
+        return board.create(f"Task {index}").id
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        ids = list(pool.map(create, range(20)))
+
+    assert len(set(ids)) == 20
+    board = DurableSharedTaskStore(sessions.task_store, "alpha")
+    assert len(board.list_tasks()) == 20

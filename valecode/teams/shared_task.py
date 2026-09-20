@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -41,6 +42,73 @@ class SharedTask:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SharedTask:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+def _normalize_task_ids(values: list[str] | None) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        task_id = str(value).strip()
+        if not task_id:
+            raise ValueError("Task dependency IDs cannot be empty")
+        if task_id not in result:
+            result.append(task_id)
+    return result
+
+
+def _apply_dependency_relations(
+    tasks: dict[str, SharedTask],
+    task_id: str,
+    *,
+    add_blocks: list[str] | None = None,
+    add_blocked_by: list[str] | None = None,
+) -> None:
+    """Validate and apply both sides of task dependency relations."""
+    task = tasks[task_id]
+    blocks = _normalize_task_ids(add_blocks)
+    blocked_by = _normalize_task_ids(add_blocked_by)
+    referenced = blocks + blocked_by
+    missing = [item for item in referenced if item not in tasks]
+    if missing:
+        raise ValueError(
+            f"Unknown shared task dependencies: {', '.join(dict.fromkeys(missing))}"
+        )
+    if task_id in referenced:
+        raise ValueError(f"Task '{task_id}' cannot depend on itself")
+
+    for blocked_id in blocks:
+        blocked = tasks[blocked_id]
+        if blocked_id not in task.blocks:
+            task.blocks.append(blocked_id)
+        if task_id not in blocked.blocked_by:
+            blocked.blocked_by.append(task_id)
+    for dependency_id in blocked_by:
+        dependency = tasks[dependency_id]
+        if dependency_id not in task.blocked_by:
+            task.blocked_by.append(dependency_id)
+        if task_id not in dependency.blocks:
+            dependency.blocks.append(task_id)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _visit(current_id: str) -> None:
+        if current_id in visiting:
+            raise ValueError("Shared task dependencies cannot contain a cycle")
+        if current_id in visited:
+            return
+        visiting.add(current_id)
+        current = tasks[current_id]
+        for dependency_id in current.blocked_by:
+            if dependency_id not in tasks:
+                raise ValueError(
+                    f"Unknown shared task dependencies: {dependency_id}"
+                )
+            _visit(dependency_id)
+        visiting.remove(current_id)
+        visited.add(current_id)
+
+    for current_id in tasks:
+        _visit(current_id)
 
 
 class SharedTaskStore:
@@ -197,11 +265,15 @@ class SharedTaskStore:
                 title=title,
                 description=description,
                 assignee=assignee,
-                blocks=blocks or [],
-                blocked_by=blocked_by or [],
                 created_by=created_by,
             )
             self._tasks[task_id] = task
+            _apply_dependency_relations(
+                self._tasks,
+                task_id,
+                add_blocks=blocks,
+                add_blocked_by=blocked_by,
+            )
             return task
 
         return self._mutate(_create)
@@ -238,23 +310,21 @@ class SharedTaskStore:
             task = self._tasks.get(task_id)
             if task is None:
                 return None
+            if status != "in_progress" and assignee is not None:
+                task.assignee = assignee
+            if description is not None:
+                task.description = description
+            _apply_dependency_relations(
+                self._tasks,
+                task_id,
+                add_blocks=add_blocks,
+                add_blocked_by=add_blocked_by,
+            )
             if status == "in_progress":
                 self._claim_loaded(
                     task_id, assignee if assignee is not None else task.assignee
                 )
-            elif assignee is not None:
-                task.assignee = assignee
-            if description is not None:
-                task.description = description
-            if add_blocks:
-                for bid in add_blocks:
-                    if bid not in task.blocks:
-                        task.blocks.append(bid)
-            if add_blocked_by:
-                for bid in add_blocked_by:
-                    if bid not in task.blocked_by:
-                        task.blocked_by.append(bid)
-            if status is not None and status != "in_progress":
+            elif status is not None:
                 task.status = status
             return task
 
@@ -312,28 +382,45 @@ class DurableSharedTaskStore:
         blocked_by: list[str] | None = None,
         created_by: str = "",
     ) -> SharedTask:
-        existing_ids = [int(s.metadata["shared_id"]) for s in self._states()]
-        display_id = str(max(existing_ids, default=0) + 1)
+        blocks = _normalize_task_ids(blocks)
+        blocked_by = _normalize_task_ids(blocked_by)
         dependencies = [
             self._database_id(item)
-            for item in blocked_by or []
-            if self._store.get(self._database_id(item)) is not None
+            for item in blocked_by
         ]
-        state = self._store.create(
-            {
-                "title": title,
-                "description": description,
-                "assignee": assignee,
-                "blocks": blocks or [],
-                "blocked_by": blocked_by or [],
-                "created_by": created_by,
-                "board_status": "pending",
-            },
-            task_id=self._database_id(display_id),
-            team_name=self._team_name,
-            dependencies=dependencies,
-            metadata={"kind": "shared_team_task", "shared_id": display_id},
-        )
+        for _ in range(50):
+            existing_ids = [int(s.metadata["shared_id"]) for s in self._states()]
+            display_id = str(max(existing_ids, default=0) + 1)
+            validation_tasks = {task.id: task for task in self.list_tasks()}
+            validation_tasks[display_id] = SharedTask(id=display_id, title=title)
+            _apply_dependency_relations(
+                validation_tasks,
+                display_id,
+                add_blocks=blocks,
+                add_blocked_by=blocked_by,
+            )
+            try:
+                state = self._store.create(
+                    {
+                        "title": title,
+                        "description": description,
+                        "assignee": assignee,
+                        "blocks": blocks,
+                        "blocked_by": blocked_by,
+                        "created_by": created_by,
+                        "board_status": "pending",
+                    },
+                    task_id=self._database_id(display_id),
+                    team_name=self._team_name,
+                    dependencies=dependencies,
+                    metadata={"kind": "shared_team_task", "shared_id": display_id},
+                )
+                break
+            except sqlite3.IntegrityError:
+                if self._store.get(self._database_id(display_id)) is None:
+                    raise
+        else:
+            raise RuntimeError("Could not allocate a shared task ID after 50 attempts")
         # ``blocks`` is the inverse relationship: add this task as a dependency
         # of every already-existing target.
         for blocked_id in blocks or []:
@@ -376,10 +463,19 @@ class DurableSharedTaskStore:
         add_blocks: list[str] | None = None,
         add_blocked_by: list[str] | None = None,
     ) -> SharedTask | None:
+        add_blocks = _normalize_task_ids(add_blocks)
+        add_blocked_by = _normalize_task_ids(add_blocked_by)
         database_id = self._database_id(task_id)
         state = self._store.get(database_id)
         if state is None or state.metadata.get("kind") != "shared_team_task":
             return None
+        validation_tasks = {task.id: task for task in self.list_tasks()}
+        _apply_dependency_relations(
+            validation_tasks,
+            task_id,
+            add_blocks=add_blocks,
+            add_blocked_by=add_blocked_by,
+        )
         data = dict(state.input)
         if status is not None and status != "in_progress":
             data["board_status"] = status
@@ -399,7 +495,6 @@ class DurableSharedTaskStore:
         dependencies = [
             self._database_id(item)
             for item in add_blocked_by or []
-            if self._store.get(self._database_id(item)) is not None
         ]
         if status == "in_progress":
             if description is not None or add_blocks or add_blocked_by:

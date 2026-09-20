@@ -76,6 +76,14 @@ class SendMessageTool(Tool):
         if mailbox is None:
             return ToolResult(output=f"Mailbox not found for team '{self._team_name}'", is_error=True)
 
+        member_ids = {member.agent_id for member in team.members}
+        team_agent_ids = member_ids | {team.lead_agent_id}
+        if self._from_agent_id not in team_agent_ids:
+            return ToolResult(
+                output="Sender is no longer a member of this team.",
+                is_error=True,
+            )
+
         msg = create_message(
             from_agent=self._from_agent_name or self._from_agent_id,
             to_agent=p.to,
@@ -98,10 +106,26 @@ class SendMessageTool(Tool):
             self._wake_pane_members(team, member_ids)
             return ToolResult(output=f"Message broadcast to {len(member_ids)} teammates.")
 
-        target_id = registry.resolve(p.to)
+        local_member = next(
+            (member for member in team.members if member.name == p.to),
+            None,
+        )
+        if p.to == "lead":
+            target_id = team.lead_agent_id
+        elif local_member is not None:
+            target_id = local_member.agent_id
+        elif p.to in team_agent_ids:
+            target_id = p.to
+        else:
+            target_id = registry.resolve(p.to)
         if target_id is None:
             return ToolResult(
                 output=f"Cannot resolve recipient '{p.to}'. Check the name or agent ID.",
+                is_error=True,
+            )
+        if target_id not in team_agent_ids:
+            return ToolResult(
+                output=f"Recipient '{p.to}' is not a member of team '{self._team_name}'.",
                 is_error=True,
             )
 

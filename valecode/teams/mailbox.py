@@ -3,11 +3,24 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+
+class MailboxLockTimeout(TimeoutError):
+    """Raised when an inbox remains owned by another process."""
+
+
+class MailboxDataError(ValueError):
+    """Raised when an existing inbox cannot be decoded safely."""
+
+
+_SAFE_AGENT_ID = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?$")
+MAILBOX_LOCK_ATTEMPTS = 50
 
 
 @dataclass
@@ -45,10 +58,18 @@ class Mailbox:
 
     # ── path helpers ─────────────────────────────────────────────
 
+    @staticmethod
+    def _validate_agent_id(agent_id: str) -> str:
+        if not isinstance(agent_id, str) or not _SAFE_AGENT_ID.fullmatch(agent_id):
+            raise ValueError("Invalid mailbox agent ID")
+        return agent_id
+
     def _inbox_path(self, agent_id: str) -> Path:
+        agent_id = self._validate_agent_id(agent_id)
         return self._base_dir / f"{agent_id}.json"
 
     def _lock_path(self, agent_id: str) -> Path:
+        agent_id = self._validate_agent_id(agent_id)
         return self._base_dir / f"{agent_id}.json.lock"
 
     # ── file lock ────────────────────────────────────────────────
@@ -56,26 +77,41 @@ class Mailbox:
     def _with_lock(
         self,
         agent_id: str,
-        fn: callable,
+        fn: Callable[[list[MailboxMessage]], Any],
+        *,
+        write_back: bool = True,
     ) -> Any:
-        """Acquire a file lock, read inbox, apply *fn* mutation, write back."""
+        """Acquire one inbox lock and never continue after acquisition failure."""
         lock_file = self._lock_path(agent_id)
+        owner_token = uuid.uuid4().hex
 
-        # Acquire lock with retries (matching Go: 10 attempts, stale > 10s)
-        lock_fd = None
+        # Bounded retries avoid both unprotected fallback and indefinite waits.
         last_err: Exception | None = None
-        for _ in range(10):
+        for _ in range(MAILBOX_LOCK_ATTEMPTS):
             try:
                 fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                lock_fd = fd
-                os.close(fd)
+                try:
+                    os.write(fd, owner_token.encode("ascii"))
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
                 break
             except FileExistsError:
                 # Lock exists — check if stale (> 10s old)
                 try:
                     info = lock_file.stat()
                     if time.time() - info.st_mtime > 10:
-                        lock_file.unlink(missing_ok=True)
+                        stale_token = lock_file.read_text(
+                            encoding="ascii", errors="replace"
+                        )
+                        latest = lock_file.stat()
+                        if (
+                            latest.st_mtime_ns == info.st_mtime_ns
+                            and lock_file.read_text(
+                                encoding="ascii", errors="replace"
+                            ) == stale_token
+                        ):
+                            lock_file.unlink(missing_ok=True)
                 except OSError:
                     pass
                 sleep_ms = 5 + random.randint(0, 95)  # 5–100ms
@@ -83,16 +119,28 @@ class Mailbox:
             except OSError as e:
                 last_err = e
                 break
+        else:
+            raise MailboxLockTimeout(
+                f"Timed out acquiring mailbox lock for '{agent_id}'"
+            )
 
-        if lock_fd is None and last_err is not None:
+        if last_err is not None:
             raise last_err
 
         try:
             messages = self._read_inbox(agent_id)
-            messages = fn(messages)
-            self._write_inbox(agent_id, messages)
+            result = fn(messages)
+            if write_back:
+                if not isinstance(result, list):
+                    raise TypeError("Mailbox mutation must return the message list")
+                self._write_inbox(agent_id, result)
+            return result
         finally:
-            lock_file.unlink(missing_ok=True)
+            try:
+                if lock_file.read_text(encoding="ascii") == owner_token:
+                    lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # ── inbox I/O ────────────────────────────────────────────────
 
@@ -102,9 +150,13 @@ class Mailbox:
             return []
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                raise TypeError("Inbox root must be a JSON array")
+            if not all(isinstance(item, dict) for item in data):
+                raise TypeError("Inbox messages must be JSON objects")
             return [MailboxMessage.from_dict(item) for item in data]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return []
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise MailboxDataError(f"Corrupt mailbox for '{agent_id}'") from exc
 
     def _write_inbox(self, agent_id: str, messages: list[MailboxMessage]) -> None:
         path = self._inbox_path(agent_id)
@@ -113,7 +165,15 @@ class Mailbox:
             ensure_ascii=False,
             indent=2,
         )
-        path.write_text(data, encoding="utf-8")
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temp_path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     # ── public API ───────────────────────────────────────────────
 
@@ -129,8 +189,11 @@ class Mailbox:
 
     def read(self, agent_id: str) -> list[MailboxMessage]:
         """Return all unread messages without marking them as read."""
-        messages = self._read_inbox(agent_id)
-        return [m for m in messages if not m.read]
+        return self._with_lock(
+            agent_id,
+            lambda messages: [m for m in messages if not m.read],
+            write_back=False,
+        )
 
     def consume(self, agent_id: str) -> list[MailboxMessage]:
         """Return all unread messages and mark them as read (thread-safe)."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 import shutil
 import tempfile
@@ -22,7 +23,13 @@ from valecode.teams.models import (
     unique_team_name,
 )
 from valecode.teams.shared_task import SharedTask, SharedTaskStore
-from valecode.teams.mailbox import Mailbox, MailboxMessage, create_message
+from valecode.teams.mailbox import (
+    Mailbox,
+    MailboxDataError,
+    MailboxLockTimeout,
+    MailboxMessage,
+    create_message,
+)
 from valecode.teams.registry import AgentNameRegistry
 from valecode.teams.backend_detect import BackendDetectionError, detect_backend, detect_pane_backend
 from valecode.teams.coordinator import (
@@ -40,6 +47,7 @@ from valecode.agents.tool_filter import (
 )
 from valecode.tools import ToolRegistry
 from valecode.tools.base import Tool, ToolResult
+from valecode.tools.send_message import SendMessageParams, SendMessageTool
 from valecode.persistence import Database, TaskStore
 from valecode.teams.manager import TeamManager
 
@@ -335,6 +343,165 @@ class TestMailbox:
         mailbox = Mailbox(tmp_dir)
         assert mailbox.consume("nonexistent") == []
         assert mailbox.read("nonexistent") == []
+
+    def test_lock_timeout_fails_closed_without_deleting_owner_lock(
+        self, tmp_dir, monkeypatch
+    ):
+        mailbox = Mailbox(tmp_dir)
+        mailbox.write("agent-1", create_message("lead", "agent-1", "existing"))
+        lock_path = mailbox._lock_path("agent-1")
+        lock_path.write_text("other-owner", encoding="ascii")
+        monkeypatch.setattr("valecode.teams.mailbox.time.sleep", lambda _delay: None)
+
+        with pytest.raises(MailboxLockTimeout):
+            mailbox.write(
+                "agent-1", create_message("lead", "agent-1", "must not append")
+            )
+
+        assert lock_path.read_text(encoding="ascii") == "other-owner"
+        lock_path.unlink()
+        assert [message.content for message in mailbox.read("agent-1")] == [
+            "existing"
+        ]
+
+    def test_read_holds_the_same_lock_as_writers(self, tmp_dir, monkeypatch):
+        mailbox = Mailbox(tmp_dir)
+        mailbox.write("agent-1", create_message("lead", "agent-1", "message"))
+        original = mailbox._read_inbox
+
+        def checked(agent_id):
+            assert mailbox._lock_path(agent_id).exists()
+            return original(agent_id)
+
+        monkeypatch.setattr(mailbox, "_read_inbox", checked)
+        assert mailbox.read("agent-1")[0].content == "message"
+
+    def test_corrupt_inbox_is_not_silently_overwritten(self, tmp_dir):
+        mailbox = Mailbox(tmp_dir)
+        inbox = mailbox._inbox_path("agent-1")
+        inbox.write_text("{not-json", encoding="utf-8")
+
+        with pytest.raises(MailboxDataError):
+            mailbox.write("agent-1", create_message("lead", "agent-1", "new"))
+
+        assert inbox.read_text(encoding="utf-8") == "{not-json"
+        assert mailbox._lock_path("agent-1").exists() is False
+
+    def test_concurrent_writes_do_not_lose_messages(self, tmp_dir):
+        mailbox = Mailbox(tmp_dir)
+
+        def send(index: int) -> None:
+            mailbox.write(
+                "agent-1",
+                create_message("lead", "agent-1", f"message-{index}"),
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(send, range(20)))
+
+        assert {message.content for message in mailbox.read("agent-1")} == {
+            f"message-{index}" for index in range(20)
+        }
+
+    @pytest.mark.parametrize("agent_id", ["../escape", "a/b", "a\\b", ""])
+    def test_agent_id_cannot_escape_mailbox_directory(self, tmp_dir, agent_id):
+        mailbox = Mailbox(tmp_dir)
+
+        with pytest.raises(ValueError, match="agent ID"):
+            mailbox.read(agent_id)
+
+
+class TestSendMessageRouting:
+    @staticmethod
+    def _setup(tmp_dir):
+        team = AgentTeam(name="alpha", lead_agent_id="lead-1")
+        team.add_member(TeammateInfo(
+            name="alice",
+            agent_id="agent-a",
+            agent_type="worker",
+            model="test",
+            worktree_path="",
+            backend_type="in-process",
+        ))
+        team.add_member(TeammateInfo(
+            name="bob",
+            agent_id="agent-b",
+            agent_type="worker",
+            model="test",
+            worktree_path="",
+            backend_type="in-process",
+        ))
+        mailbox = Mailbox(tmp_dir)
+        manager = MagicMock()
+        manager.get_team.return_value = team
+        manager.get_mailbox.return_value = mailbox
+        manager.get_pane_id.return_value = None
+        registry = AgentNameRegistry.instance()
+        registry.register("alice", "agent-a")
+        registry.register("bob", "agent-b")
+        return team, mailbox, manager
+
+    @pytest.mark.asyncio
+    async def test_lead_alias_routes_to_real_lead_mailbox(self, tmp_dir):
+        _team, mailbox, manager = self._setup(tmp_dir)
+        tool = SendMessageTool(manager, "alpha", "agent-a", "alice")
+
+        result = await tool.execute(SendMessageParams(
+            to="lead",
+            message="Work is complete",
+            summary="work completed",
+        ))
+
+        assert result.is_error is False
+        messages = mailbox.consume("lead-1")
+        assert [message.content for message in messages] == ["Work is complete"]
+
+    @pytest.mark.asyncio
+    async def test_global_registry_cannot_route_to_another_team(self, tmp_dir):
+        _team, mailbox, manager = self._setup(tmp_dir)
+        AgentNameRegistry.instance().register("outsider", "agent-other")
+        tool = SendMessageTool(manager, "alpha", "agent-a", "alice")
+
+        result = await tool.execute(SendMessageParams(
+            to="outsider",
+            message="secret",
+            summary="cross team message",
+        ))
+
+        assert result.is_error is True
+        assert "not a member" in result.output
+        assert mailbox.read("agent-other") == []
+
+    @pytest.mark.asyncio
+    async def test_team_local_name_wins_over_global_registry_collision(self, tmp_dir):
+        _team, mailbox, manager = self._setup(tmp_dir)
+        AgentNameRegistry.instance().register("bob", "agent-other")
+        tool = SendMessageTool(manager, "alpha", "agent-a", "alice")
+
+        result = await tool.execute(SendMessageParams(
+            to="bob",
+            message="for local bob",
+            summary="local teammate message",
+        ))
+
+        assert result.is_error is False
+        assert mailbox.consume("agent-b")[0].content == "for local bob"
+        assert mailbox.read("agent-other") == []
+
+    @pytest.mark.asyncio
+    async def test_stale_sender_is_rejected(self, tmp_dir):
+        _team, mailbox, manager = self._setup(tmp_dir)
+        tool = SendMessageTool(manager, "alpha", "agent-old", "old")
+
+        result = await tool.execute(SendMessageParams(
+            to="bob",
+            message="secret",
+            summary="stale sender message",
+        ))
+
+        assert result.is_error is True
+        assert "no longer a member" in result.output
+        assert mailbox.read("agent-b") == []
 
 # =====================================================================
 # 4. AgentNameRegistry

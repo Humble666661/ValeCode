@@ -664,6 +664,13 @@ class AgentTool(Tool):
             backend_type=backend.value,
             is_active=True,
         )
+        from valecode.teams.progress import TeammateProgress, random_verb
+
+        member.progress = TeammateProgress(
+            name=teammate_name,
+            team_name=p.team_name,
+            spinner_verb=random_verb(),
+        )
         self._team_manager.register_member(p.team_name, member)
 
         # 8. 按后端类型启动队友
@@ -678,6 +685,10 @@ class AgentTool(Tool):
             task="" if is_fork else p.prompt,
             name=teammate_name,
             fork_conversation=conversation if is_fork else None,
+            teammate_progress=member.progress,
+        )
+        self._team_manager.register_inprocess_task(
+            agent_id, self._task_manager, task_id
         )
 
         return ToolResult(

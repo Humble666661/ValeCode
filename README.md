@@ -19,7 +19,8 @@ Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
 - **可组合工具系统**：Built-in、Plugin、MCP 和 Session 四层 Registry，配合
   Skills、Hooks、权限规则和资源生命周期管理。
 - **多 Agent 协作**：支持 Sub-Agent、后台 Agent、Agent Team、结构化邮箱事件以及
-  Git Worktree 隔离；共享任务板支持依赖、优先级与百分比进度，消息仅在所属 Team 内路由。
+  Git Worktree 隔离；共享任务板支持依赖、优先级与百分比进度，消息仅在所属 Team 内路由；
+  TUI 可读取队友的实时工具、Token 与状态进度，Team 删除会收口实际运行中的进程内任务。
 - **上下文与结果管理**：支持上下文压缩、可验证 Checkpoint、工具调用链对齐、
   超长结果卸载和引用感知清理。
 - **可观测性**：模型、工具、权限、Hook、压缩、恢复和任务调度均可输出
@@ -299,7 +300,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **841 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **844 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

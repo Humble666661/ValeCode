@@ -36,6 +36,7 @@ class BackgroundTask:
     board_team_name: str = ""
     board_task_id: str = ""
     board_synced: bool = False
+    teammate_progress: Any = None
 
 
 class TaskManager:
@@ -57,6 +58,7 @@ class TaskManager:
         resume_spec: dict[str, Any] | None = None,
         board_team_name: str = "",
         board_task_id: str = "",
+        teammate_progress: Any = None,
     ) -> str:
         # The in-memory manager does not need a reconstruction descriptor, but
         # accepts it so callers can use the same launch contract as the durable
@@ -70,6 +72,7 @@ class TaskManager:
             task=task,
             board_team_name=board_team_name,
             board_task_id=board_task_id,
+            teammate_progress=teammate_progress,
         )
         self._tasks[task_id] = bg
 
@@ -90,26 +93,26 @@ class TaskManager:
             return
 
         try:
+            event_callback = self._progress_callback(bg)
             if fork_conversation is not None:
-                result = await bg.agent.run_to_completion("", fork_conversation)
+                result = await bg.agent.run_to_completion(
+                    "", fork_conversation, event_callback=event_callback
+                )
             else:
-                result = await bg.agent.run_to_completion(bg.task)
+                result = await bg.agent.run_to_completion(
+                    bg.task, event_callback=event_callback
+                )
             bg.result = result
             bg.status = "completed"
             self._sync_board_task(bg, "completed")
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "idle"
+            if bg.agent.team_name and bg.agent._team_manager:
+                bg.agent._team_manager.set_member_idle(bg.agent.team_name, bg.name)
 
             if bg.agent.team_name and bg.agent._team_manager:
                 mailbox = bg.agent._team_manager.get_mailbox(bg.agent.team_name)
                 if mailbox:
-                    from valecode.teams.mailbox import create_message
-                    msg = create_message(
-                        from_agent=bg.name,
-                        to_agent="lead",
-                        content=f"[idle] {bg.name}: completed initial task",
-                        summary=f"{bg.name} idle",
-                    )
-                    mailbox.write("lead", msg)
-
                     for _ in range(60):
                         await asyncio.sleep(1)
                         msgs = mailbox.consume(bg.agent.agent_id)
@@ -118,24 +121,33 @@ class TaskManager:
                         prompt = "\n\n".join(
                             f"[Message from {m.from_agent}] {m.content}" for m in msgs
                         )
-                        result = await bg.agent.run_to_completion(prompt)
-                        bg.result = result
-                        msg = create_message(
-                            from_agent=bg.name,
-                            to_agent="lead",
-                            content=f"[idle] {bg.name}: completed follow-up",
-                            summary=f"{bg.name} idle",
+                        if bg.teammate_progress is not None:
+                            bg.teammate_progress.status = "running"
+                        bg.agent._team_manager.set_member_active(
+                            bg.agent.team_name, bg.name
                         )
-                        mailbox.write("lead", msg)
+                        result = await bg.agent.run_to_completion(
+                            prompt, event_callback=event_callback
+                        )
+                        bg.result = result
+                        if bg.teammate_progress is not None:
+                            bg.teammate_progress.status = "idle"
+                        bg.agent._team_manager.set_member_idle(
+                            bg.agent.team_name, bg.name
+                        )
 
         except asyncio.CancelledError:
             bg.status = "cancelled"
             bg.result = "Task was cancelled"
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "stopped"
             self._sync_board_task(bg, "cancelled")
         except Exception as e:
             log.error("Background task %s failed: %s", task_id, e)
             bg.status = "failed"
             bg.result = f"Error: {e}"
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "failed"
             self._sync_board_task(bg, "failed")
         finally:
             bg.end_time = time.monotonic()
@@ -143,6 +155,32 @@ class TaskManager:
             bg.progress.output_tokens = bg.agent.total_output_tokens
             self._async_tasks.pop(task_id, None)
             await self._notify_queue.put(task_id)
+            if bg.agent.team_name and bg.agent._team_manager:
+                bg.agent._team_manager.on_teammate_completed(bg.agent.agent_id)
+
+    @staticmethod
+    def _progress_callback(bg: BackgroundTask) -> Callable[[dict[str, Any]], None] | None:
+        progress = bg.teammate_progress
+        if progress is None:
+            return None
+
+        def _on_event(event: dict[str, Any]) -> None:
+            event_type = event.get("type")
+            if event_type == "tool_use":
+                progress.record_tool_use(
+                    str(event.get("toolName", "")), event.get("args", {})
+                )
+            elif event_type == "usage":
+                usage = event.get("usage", {})
+                progress.record_tokens(
+                    int(usage.get("inputTokens", 0)),
+                    int(usage.get("outputTokens", 0)),
+                )
+            elif event_type == "stream_text" and event.get("text"):
+                with progress._lock:
+                    progress.last_message = str(event["text"])
+
+        return _on_event
 
     @staticmethod
     def _sync_board_task(bg: BackgroundTask, outcome: str) -> None:
@@ -243,6 +281,8 @@ class TaskManager:
             async_task.cancel()
             bg.status = "cancelled"
             bg.result = "Task was cancelled"
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "stopped"
             self._sync_board_task(bg, "cancelled")
             return True
         return False
@@ -281,4 +321,6 @@ class TaskManager:
                     bg.status = "cancelled"
                     bg.result = "Task was cancelled"
                     bg.end_time = time.monotonic()
+                    if bg.teammate_progress is not None:
+                        bg.teammate_progress.status = "stopped"
                     self._sync_board_task(bg, "cancelled")

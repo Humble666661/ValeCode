@@ -18,7 +18,6 @@ from valecode.teams.models import (
 from valecode.teams.progress import TeammateProgress
 from valecode.teams.registry import AgentNameRegistry
 from valecode.teams.shared_task import DurableSharedTaskStore, SharedTaskStore
-from valecode.teams.spawn_inprocess import InProcessTeammateHandle
 from valecode.worktree.paths import canonical_path, is_path_within, require_path_within
 from valecode.persistence import TeamStore
 
@@ -42,8 +41,8 @@ class TeamManager:
         self._teams: dict[str, AgentTeam] = {}
         self._task_stores: dict[str, SharedTaskStore] = {}
         self._mailboxes: dict[str, Mailbox] = {}
-        self._inprocess_handles: dict[str, InProcessTeammateHandle] = {}
         self._pane_ids: dict[str, str] = {}  # agent_id -> pane_id (tmux/iterm2)
+        self._inprocess_tasks: dict[str, tuple[Any, str]] = {}
         self._detected_backend: BackendType | None = None
         self._worktree_manager = worktree_manager
         self._trace_manager = trace_manager
@@ -205,6 +204,9 @@ class TeamManager:
         team = self.get_team(team_name)
         if team is None:
             return
+        member = team.get_member(member_name)
+        if member is None or member.is_active is False:
+            return
         team.set_member_active(member_name, False)
         team.save()
         if self._team_store is not None:
@@ -221,8 +223,19 @@ class TeamManager:
             )
             mailbox.write(team.lead_agent_id, msg)
 
-    def register_inprocess_handle(self, agent_id: str, handle: InProcessTeammateHandle) -> None:
-        self._inprocess_handles[agent_id] = handle
+    def set_member_active(self, team_name: str, member_name: str) -> None:
+        team = self.get_team(team_name)
+        if team is None:
+            return
+        team.set_member_active(member_name, True)
+        team.save()
+        if self._team_store is not None:
+            self._team_store.set_member_active(team_name, member_name, True)
+
+    def register_inprocess_task(
+        self, agent_id: str, task_manager: Any, task_id: str
+    ) -> None:
+        self._inprocess_tasks[agent_id] = (task_manager, task_id)
 
     def register_pane_id(self, agent_id: str, pane_id: str) -> None:
         self._pane_ids[agent_id] = pane_id
@@ -244,9 +257,10 @@ class TeamManager:
         for member in list(team.members):
             AgentNameRegistry.instance().unregister(member.name)
 
-            handle = self._inprocess_handles.pop(member.agent_id, None)
-            if handle and not handle.done:
-                handle.cancel()
+            runtime = self._inprocess_tasks.pop(member.agent_id, None)
+            if runtime is not None:
+                task_manager, task_id = runtime
+                task_manager.cancel(task_id)
 
             pane_id = self._pane_ids.pop(member.agent_id, None)
             if pane_id:
@@ -320,6 +334,7 @@ class TeamManager:
         return results
 
     def on_teammate_completed(self, agent_id: str) -> None:
+        self._inprocess_tasks.pop(agent_id, None)
         team_name = self.get_team_for_teammate(agent_id)
         if team_name is None:
             return

@@ -189,6 +189,7 @@ class DurableTaskManager(TaskManager):
         resume_spec: dict[str, Any] | None = None,
         board_team_name: str = "",
         board_task_id: str = "",
+        teammate_progress: Any = None,
     ) -> str:
         parent_run_id = getattr(agent, "parent_run_id", None)
         task_run_id = (
@@ -218,6 +219,7 @@ class DurableTaskManager(TaskManager):
                 status="queued",
                 board_team_name=board_team_name,
                 board_task_id=board_task_id,
+                teammate_progress=teammate_progress,
             )
             self._tasks[task_id] = bg
             resumable = (
@@ -333,6 +335,10 @@ class DurableTaskManager(TaskManager):
                 bg.progress.output_tokens = bg.agent.total_output_tokens
                 self._async_tasks.pop(task_id, None)
                 await self._notify_queue.put(task_id)
+                if bg.agent.team_name and bg.agent._team_manager:
+                    bg.agent._team_manager.on_teammate_completed(
+                        bg.agent.agent_id
+                    )
                 span.set_attributes(
                     {
                         "task.status": bg.status,
@@ -357,13 +363,16 @@ class DurableTaskManager(TaskManager):
                     },
                 ) as attempt_span:
                     try:
+                        event_callback = self._progress_callback(bg)
                         if fork_conversation is not None:
                             result = await bg.agent.run_to_completion(
-                                "", fork_conversation
+                                "", fork_conversation, event_callback=event_callback
                             )
                             fork_conversation = None
                         else:
-                            result = await bg.agent.run_to_completion(bg.task)
+                            result = await bg.agent.run_to_completion(
+                                bg.task, event_callback=event_callback
+                            )
                     except BaseException as exc:
                         attempt_span.record_exception(exc)
                         attempt_span.set_attributes({"task.attempt.status": "failed"})
@@ -373,6 +382,12 @@ class DurableTaskManager(TaskManager):
                 bg.status = "completed"
                 self._succeed(bg)
                 self._sync_board_task(bg, "completed")
+                if bg.teammate_progress is not None:
+                    bg.teammate_progress.status = "idle"
+                if bg.agent.team_name and bg.agent._team_manager:
+                    bg.agent._team_manager.set_member_idle(
+                        bg.agent.team_name, bg.name
+                    )
                 await self._teammate_idle_loop(bg)
                 return
             except asyncio.CancelledError:
@@ -396,17 +411,6 @@ class DurableTaskManager(TaskManager):
         mailbox = bg.agent._team_manager.get_mailbox(bg.agent.team_name)
         if not mailbox:
             return
-        from valecode.teams.mailbox import create_message
-
-        mailbox.write(
-            "lead",
-            create_message(
-                from_agent=bg.name,
-                to_agent="lead",
-                content=f"[idle] {bg.name}: completed initial task",
-                summary=f"{bg.name} idle",
-            ),
-        )
         for _ in range(60):
             await asyncio.sleep(1)
             messages = mailbox.consume(bg.agent.agent_id)
@@ -416,16 +420,15 @@ class DurableTaskManager(TaskManager):
                 f"[Message from {message.from_agent}] {message.content}"
                 for message in messages
             )
-            bg.result = await bg.agent.run_to_completion(prompt)
-            mailbox.write(
-                "lead",
-                create_message(
-                    from_agent=bg.name,
-                    to_agent="lead",
-                    content=f"[idle] {bg.name}: completed follow-up",
-                    summary=f"{bg.name} idle",
-                ),
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "running"
+            bg.agent._team_manager.set_member_active(bg.agent.team_name, bg.name)
+            bg.result = await bg.agent.run_to_completion(
+                prompt, event_callback=self._progress_callback(bg)
             )
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "idle"
+            bg.agent._team_manager.set_member_idle(bg.agent.team_name, bg.name)
 
     def _retry_delay(self, attempt: int) -> float:
         return min(
@@ -480,6 +483,8 @@ class DurableTaskManager(TaskManager):
             return
         bg.status = "cancelled"
         bg.result = "Task was cancelled"
+        if bg.teammate_progress is not None:
+            bg.teammate_progress.status = "stopped"
         self._sync_board_task(bg, "cancelled")
         state = self.task_store.get(bg.id)
         if state is None or state.status == TaskStatus.CANCELLED:
@@ -505,6 +510,8 @@ class DurableTaskManager(TaskManager):
         state = self.task_store.get(bg.id)
         if state is None:
             bg.status = "failed"
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "failed"
             self._sync_board_task(bg, "failed")
             return False
         self.task_store.finish_attempt(
@@ -512,6 +519,8 @@ class DurableTaskManager(TaskManager):
         )
         if state.attempt_count >= state.max_attempts:
             bg.status = "failed"
+            if bg.teammate_progress is not None:
+                bg.teammate_progress.status = "failed"
             self.task_store.transition(
                 bg.id,
                 TaskStatus.FAILED,

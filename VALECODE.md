@@ -78,7 +78,7 @@ uv run valecode -p "检查当前改动"
 uv run pytest -q
 ```
 
-当前完整基线为 `841 passed, 1 skipped`。新增行为必须包含正常路径和至少一个失败、
+当前完整基线为 `844 passed, 1 skipped`。新增行为必须包含正常路径和至少一个失败、
 取消、重启或边界场景测试。
 
 ## Python 代码规范

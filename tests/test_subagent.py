@@ -26,6 +26,7 @@ from valecode.agents.fork import (
 from valecode.agents.trace import TraceManager, TraceNode
 from valecode.agents.task_manager import BackgroundTask, TaskManager
 from valecode.agents.notification import format_task_notification, inject_task_notifications
+from valecode.teams.progress import TeammateProgress
 from valecode.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
 from valecode.tools import ToolRegistry
 from valecode.tools.base import Tool, ToolResult
@@ -703,6 +704,43 @@ class TestTaskManager:
         names = {t.name for t in tasks}
         assert names == {"t1", "t2"}
         await asyncio.sleep(0.1)  # 让后台任务跑完
+
+    @pytest.mark.asyncio
+    async def test_teammate_progress_receives_real_runtime_events(self, mock_agent):
+        async def emit_events(_prompt, **kwargs):
+            callback = kwargs["event_callback"]
+            callback(
+                {
+                    "type": "tool_use",
+                    "toolName": "ReadFile",
+                    "args": {"file_path": "agent.py"},
+                }
+            )
+            callback(
+                {
+                    "type": "usage",
+                    "usage": {"inputTokens": 120, "outputTokens": 30},
+                }
+            )
+            callback({"type": "stream_text", "text": "working"})
+            return "done"
+
+        mock_agent.run_to_completion = emit_events
+        progress = TeammateProgress(name="worker", team_name="alpha")
+        manager = TaskManager()
+        task_id = manager.launch(
+            mock_agent,
+            "inspect",
+            name="worker",
+            teammate_progress=progress,
+        )
+        await manager._async_tasks[task_id]
+
+        assert progress.status == "idle"
+        assert progress.tool_use_count == 1
+        assert progress.token_count == 150
+        assert progress.activity_summary == "Reading agent.py"
+        assert progress.last_message == "working"
 
     def test_cancel_nonexistent(self):
         tm = TaskManager()

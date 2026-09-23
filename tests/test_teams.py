@@ -233,6 +233,58 @@ def test_team_manager_persists_and_recovers_member_state(tmp_path):
         assert restored_manager._team_store.get_team(team.name).status == "deleted"
 
 
+def test_set_member_idle_notifies_only_on_state_transition(tmp_path):
+    state_home = tmp_path / "state-home"
+    with patch("valecode.teams.models.Path.home", return_value=state_home):
+        manager = TeamManager()
+        team = manager.create_team("idle-team", "lead", teammate_mode="in-process")
+        member = TeammateInfo(
+            name="worker",
+            agent_id="agent-1",
+            agent_type="general",
+            model="test",
+            worktree_path="",
+            backend_type="in-process",
+            is_active=True,
+        )
+        manager.register_member(team.name, member)
+
+        manager.set_member_idle(team.name, member.name)
+        manager.set_member_idle(team.name, member.name)
+
+        mailbox = manager.get_mailbox(team.name)
+        messages = mailbox.consume(team.lead_agent_id)
+        assert len(messages) == 1
+        assert messages[0].summary == "worker idle"
+
+
+def test_team_delete_cancels_registered_inprocess_runtime(tmp_path):
+    state_home = tmp_path / "state-home"
+    with patch("valecode.teams.models.Path.home", return_value=state_home):
+        manager = TeamManager()
+        team = manager.create_team(
+            "runtime-team", "lead", teammate_mode="in-process"
+        )
+        member = TeammateInfo(
+            name="worker",
+            agent_id="agent-1",
+            agent_type="general",
+            model="test",
+            worktree_path="",
+            backend_type="in-process",
+            is_active=False,
+        )
+        manager.register_member(team.name, member)
+        task_manager = MagicMock()
+        task_manager.cancel.return_value = True
+        manager.register_inprocess_task(member.agent_id, task_manager, "task-1")
+
+        manager.delete_team(team.name)
+
+        task_manager.cancel.assert_called_once_with("task-1")
+        assert member.agent_id not in manager._inprocess_tasks
+
+
 # =====================================================================
 # 3. SharedTaskStore
 # =====================================================================

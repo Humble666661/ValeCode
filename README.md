@@ -211,6 +211,39 @@ mcp_servers:
 可通过 `/mcp` 查看实际名称。资源与 Prompt 沿用 MCP 工具的权限、Hooks 和结果预算，
 获取到的 Prompt 消息作为工具结果返回。
 
+## 定时 Agent 任务
+
+`CronCreate` 可为当前会话创建一次性、固定间隔或五段 Cron 计划，`CronList` 查看计划
+和最近执行，`CronUpdate` 暂停/恢复，`CronDelete` 删除。TUI/Remote 也支持
+`/cron list`、`/cron pause <id>`、`/cron resume <id>`、`/cron delete <id>`。
+
+例如，向 ValeCode 明确要求“每小时用 Explore 检查项目状态，时区 Asia/Shanghai”，
+由模型通过 `CronCreate` 发起并经过正常权限检查。工具参数示例：
+
+```json
+{
+  "name": "项目状态检查",
+  "prompt": "只读检查项目状态并报告异常，不修改文件。",
+  "subagent_type": "Explore",
+  "schedule_type": "cron",
+  "schedule_spec": {"cron": "0 * * * *"},
+  "timezone": "Asia/Shanghai"
+}
+```
+
+`interval` 使用 `{"every_seconds": 3600}`（最低 60 秒）；`once` 使用 ISO 时间
+`{"run_at": "2026-10-01T09:00:00+08:00"}`。时区使用 IANA 名称，默认 UTC。
+
+计划与执行实例在 SQLite 同一事务内落盘，多个进程不会重复接纳同一触发；同一计划
+不重叠执行，错过的周期合并一次，不连续补发历史。**只在 ValeCode 运行且对应 Session
+打开时触发**，不是关机后仍运行的系统服务。恢复计划需恢复原 Session；单次 `-p` 退出
+也会停掉计时器。每 Session 最多 50 个活动计划。
+
+后台实例使用默认权限并保留当前项目规则，不继承父会话的一次性授权或 bypass 模式；
+需交互审批的操作不会无人值守放行。暂停/删除取消尚未领取的实例，运行中实例继续，
+需要终止时使用 `/tasks cancel <task-id>`。只恢复尚未开始的持久实例；已开始的定时
+任务中断后不自动从头重放，避免重复外部副作用。历史执行保留用于审计。
+
 ## 记忆召回
 
 记忆保存在用户或项目的 Markdown 文件中；大目录使用可重建的 SQLite FTS5 缓存缩小
@@ -359,7 +392,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **910 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **938 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

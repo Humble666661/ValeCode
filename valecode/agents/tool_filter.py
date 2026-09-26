@@ -23,6 +23,10 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "TaskList",
     "TaskUpdate",
     "TaskDispatch",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "CronUpdate",
 })
 
 CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
@@ -62,14 +66,14 @@ TEAMMATE_COORDINATION_TOOLS: frozenset[str] = frozenset({
 })
 
 IN_PROCESS_TEAMMATE_ALLOWED_TOOLS: frozenset[str] = (
-    ASYNC_AGENT_ALLOWED_TOOLS | TEAMMATE_COORDINATION_TOOLS | frozenset({
-        "CronCreate",
-        "CronDelete",
-        "CronList",
-    })
+    ASYNC_AGENT_ALLOWED_TOOLS | TEAMMATE_COORDINATION_TOOLS
 )
 
 COORDINATOR_MODE_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "CronCreate",
+    "CronList",
+    "CronUpdate",
+    "CronDelete",
     "Agent",
     "SendMessage",
     "TaskCreate",
@@ -216,7 +220,7 @@ def clone_registry_for_fork(parent_registry: ToolRegistry) -> ToolRegistry:
 
     forked = ToolRegistry()
     for tool in parent_registry.list_tools():
-        if tool.name == "TodoWrite":
+        if tool.name in {"TodoWrite", "CronCreate", "CronList", "CronUpdate", "CronDelete"}:
             continue
         if tool.name == "Agent" and hasattr(tool, "query_source"):
             clone = copy.copy(tool)

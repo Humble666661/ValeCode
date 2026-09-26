@@ -296,12 +296,37 @@ def _migration_005_team_state(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migration_006_schedules(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE schedules (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            name TEXT NOT NULL, prompt TEXT NOT NULL, work_dir TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('once','interval','cron')),
+            spec_json TEXT NOT NULL, timezone TEXT NOT NULL, agent_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('enabled','paused','running','completed','failed','deleted')),
+            next_run REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+    """)
+    connection.execute("""
+        CREATE TABLE schedule_occurrences (
+            schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+            scheduled_for REAL NOT NULL,
+            task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+            admitted_at TEXT NOT NULL,
+            PRIMARY KEY(schedule_id, scheduled_for)
+        )
+    """)
+    connection.execute("CREATE INDEX idx_schedules_due ON schedules(session_id,status,next_run)")
+
+
 MIGRATIONS = (
     Migration(1, "initial_control_plane", _migration_001_initial_control_plane),
     Migration(2, "task_dependencies", _migration_002_task_dependencies),
     Migration(3, "compact_checkpoints", _migration_003_compact_checkpoints),
     Migration(4, "result_artifacts", _migration_004_result_artifacts),
     Migration(5, "team_state", _migration_005_team_state),
+    Migration(6, "schedules", _migration_006_schedules),
 )
 
 

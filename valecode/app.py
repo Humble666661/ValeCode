@@ -650,6 +650,7 @@ class ValeCodeApp(App):
         self._load_skill_tool: LoadSkill | None = None
         self.agent_loader: AgentLoader | None = None
         self.agent_tool: AgentTool | None = None
+        self.cron_runtime = None
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
         self._notification_check_task: asyncio.Task[None] | None = None
@@ -930,6 +931,11 @@ class ValeCodeApp(App):
             team_manager=self.team_manager,
         )
         self.registry.register(self.agent_tool)
+        from valecode.runtime.cron import install_cron
+        from valecode.commands.handlers.cron import create_cron_command
+        self.cron_runtime = install_cron(self.agent_tool, self.registry,
+            ready=lambda: self._mcp_init_task is None or self._mcp_init_task.done())
+        self.command_registry.register_sync(create_cron_command(self.cron_runtime))
 
         team_create_tool = TeamCreateTool(
             team_manager=self.team_manager,
@@ -2078,6 +2084,8 @@ class ValeCodeApp(App):
         self._exit_requested = True
 
         async def _cleanup() -> None:
+            if self.cron_runtime is not None:
+                await self.cron_runtime.close()
             tasks: list[asyncio.Task] = []
 
             if (

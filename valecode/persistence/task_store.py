@@ -711,6 +711,20 @@ class TaskStore:
                 recovered.append(self._from_row(updated))
         return recovered
 
+    def cancel_for_worker(self, task_id: str, worker_id: str, *, error: str) -> TaskState | None:
+        """Cancel unclaimed work or our own lease, never another worker's run."""
+        now = utc_now()
+        with self.database.transaction(immediate=True) as db:
+            row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None or TaskStatus(row["status"]) in _TASK_FINISHED:
+                return None
+            if row["status"] != "queued" and row["lease_owner"] != worker_id:
+                return None
+            db.execute("UPDATE task_attempts SET status='cancelled',error=?,completed_at=? WHERE task_id=? AND attempt=? AND completed_at IS NULL", (error, now, task_id, row["attempt_count"]))
+            db.execute("UPDATE tasks SET status='cancelled',error=?,completed_at=?,updated_at=?,lease_owner=NULL,lease_expires_at=NULL,heartbeat_at=NULL,version=version+1 WHERE id=?", (error, now, now, task_id))
+            self.events._append(db, "task.status_changed", session_id=row["session_id"], run_id=row["run_id"], task_id=task_id, payload={"from": row["status"], "to": "cancelled"})
+            return self._from_row(db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+
     def release_for_shutdown(
         self,
         task_id: str,

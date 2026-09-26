@@ -271,7 +271,9 @@ class DurableTaskManager(TaskManager):
     async def _claim_when_ready(self, bg: BackgroundTask) -> bool:
         while True:
             state = self.task_store.get(bg.id)
-            if state is None or state.status in {TaskStatus.CANCELLED, TaskStatus.FAILED}:
+            if state is None or state.status in {TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.SUCCEEDED}:
+                if state is not None:
+                    bg.status = "completed" if state.status == TaskStatus.SUCCEEDED else state.status.value
                 return False
             claimed = self.task_store.claim(
                 bg.id, self.worker_id, lease_seconds=self.lease_seconds
@@ -487,23 +489,7 @@ class DurableTaskManager(TaskManager):
             bg.teammate_progress.status = "stopped"
         self._sync_board_task(bg, "cancelled")
         state = self.task_store.get(bg.id)
-        if state is None or state.status == TaskStatus.CANCELLED:
-            return
-        if state.attempt_count:
-            try:
-                self.task_store.finish_attempt(
-                    bg.id, state.attempt_count, status="cancelled", error=bg.result
-                )
-            except KeyError:
-                pass
-        self.task_store.transition(
-            bg.id,
-            TaskStatus.CANCELLED,
-            error=bg.result,
-            lease_owner=None,
-            lease_expires_at=None,
-            heartbeat_at=None,
-        )
+        self.task_store.cancel_for_worker(bg.id, self.worker_id, error=bg.result)
 
     def _fail_or_requeue(self, bg: BackgroundTask, exc: Exception) -> bool:
         bg.result = f"Error: {exc}"
@@ -626,6 +612,7 @@ class DurableTaskManager(TaskManager):
                 and isinstance(state.metadata, dict)
                 and state.metadata.get("resumable") is True
                 and isinstance(state.metadata.get("resume_spec"), dict)
+                and (not state.metadata.get("schedule_id") or state.status == TaskStatus.QUEUED)
             )
             if resumable:
                 self._shutdown_requeue_ids.add(task_id)

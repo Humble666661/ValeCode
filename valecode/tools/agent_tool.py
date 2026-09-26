@@ -291,6 +291,11 @@ class AgentTool(Tool):
             if definition is None:
                 log.warning("Task %s has an invalid resume descriptor", state.id)
                 continue
+            scheduled = bool(metadata.get("schedule_id"))
+            if scheduled:
+                from pathlib import Path
+                if definition.permission_mode != "default" or metadata.get("scheduled_work_dir") != str(Path(self._parent_agent.work_dir).resolve()):
+                    continue
             trace_id = None
             if state.run_id and self._parent_agent.run_store is not None:
                 try:
@@ -305,6 +310,13 @@ class AgentTool(Tool):
                     parent_run_id=state.run_id,
                     trace_id=trace_id,
                 )
+                if scheduled:
+                    from valecode.runtime.execution import CancellationToken
+                    sub_agent.cancellation_token = CancellationToken()
+                    sub_agent._owns_cancellation_token = True
+                    parent_checker = self._parent_agent.permission_checker
+                    if parent_checker is not None:
+                        sub_agent.permission_checker.rule_engine = parent_checker.rule_engine.clone()
                 adopt_persisted(state.id, sub_agent)
             except (KeyError, ValueError):
                 # A competing worker may have claimed or cancelled it between

@@ -176,12 +176,18 @@ class _PromptResources:
         self.session = None
         self.mcp_manager = None
         self.task_manager = None
+        self.cron_runtime = None
         self._closed = False
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self.cron_runtime is not None:
+            try:
+                await self.cron_runtime.close()
+            except Exception:
+                logging.warning("Failed to stop prompt Cron runtime", exc_info=True)
         if self.mcp_manager is not None:
             try:
                 await self.mcp_manager.shutdown()
@@ -376,6 +382,8 @@ async def _run_prompt(
         team_manager=team_manager,
     )
     registry.register(agent_tool)
+    from valecode.runtime.cron import install_cron
+    resources.cron_runtime = install_cron(agent_tool, registry)
     registry.register(TeamCreateTool(
         team_manager=team_manager,
         parent_agent=agent,

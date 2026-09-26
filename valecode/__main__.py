@@ -76,7 +76,19 @@ def main() -> None:
         default=False,
         help="Start the browser UI (defaults to 127.0.0.1:18888)",
     )
+    parser.add_argument("--teammate-launch", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.teammate_launch is not None:
+        if args.p is not None or args.remote or args.mode is not None:
+            parser.error("--teammate-launch cannot be combined with public run modes")
+        from valecode.teams.worker import run_worker
+        try:
+            code = asyncio.run(run_worker(args.teammate_launch))
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"Teammate launch error: {exc}", file=sys.stderr)
+            code = 1
+        sys.exit(code)
 
     # --help / argparse 参数错误应在触碰项目状态目录之前完成。
     _configure_logging()
@@ -177,12 +189,18 @@ class _PromptResources:
         self.mcp_manager = None
         self.task_manager = None
         self.cron_runtime = None
+        self.team_manager = None
         self._closed = False
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self.team_manager is not None:
+            try:
+                await self.team_manager.close()
+            except Exception:
+                logging.warning("Failed to stop pane teammates", exc_info=True)
         if self.cron_runtime is not None:
             try:
                 await self.cron_runtime.close()
@@ -370,6 +388,7 @@ async def _run_prompt(
         trace_manager=trace_manager,
         task_store=session_manager.task_store,
     )
+    resources.team_manager = team_manager
 
     agent_tool = AgentTool(
         agent_loader=agent_loader,

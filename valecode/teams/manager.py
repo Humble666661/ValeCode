@@ -50,6 +50,8 @@ class TeamManager:
         self._durable_task_store = task_store
         task_database = getattr(task_store, "database", None)
         self._team_store = TeamStore(task_database) if task_database is not None else None
+        from valecode.teams.pane_supervisor import PaneSupervisor
+        self.pane_supervisor = PaneSupervisor(self)
 
     def detect_backend(
         self,
@@ -83,6 +85,7 @@ class TeamManager:
             lead_agent_id=lead_agent_id,
             config_path=config_path,
             description=description,
+            backend_type=backend.value,
         )
         team.save()
 
@@ -112,6 +115,7 @@ class TeamManager:
         return team
     def get_team(self, name: str) -> AgentTeam | None:
         if name in self._teams:
+            self._refresh_pane_members(self._teams[name])
             return self._teams[name]
         team_dir = resolve_team_dir(name)
         config_path = team_dir / "config.json"
@@ -128,8 +132,13 @@ class TeamManager:
                         current_state.backend_type if current_state is not None else ""
                     ),
                 )
+                persisted_members = {m.agent_id: m for m in self._team_store.list_members(team.name)}
                 for member in team.members:
-                    self._team_store.upsert_member(team.name, member)
+                    if member.agent_id not in persisted_members:
+                        self._team_store.upsert_member(team.name, member)
+                if current_state is not None:
+                    team.backend_type = current_state.backend_type or "in-process"
+                self._refresh_pane_members(team)
             return team
         if self._team_store is not None:
             state = self._team_store.get_team(name)
@@ -138,6 +147,7 @@ class TeamManager:
                     name=state.name,
                     lead_agent_id=state.lead_agent_id,
                     description=state.description,
+                    backend_type=state.backend_type or "in-process",
                     config_path=str(config_path),
                 )
                 for member in self._team_store.list_members(name):
@@ -170,6 +180,20 @@ class TeamManager:
             self._task_stores[team_name] = store
             return store
         return None
+
+    def _refresh_pane_members(self, team) -> None:
+        if self._team_store is None or not any(m.backend_type != "in-process" for m in team.members):
+            return
+        rows = {m.agent_id: m for m in self._team_store.list_members(team.name)}
+        for member in team.members:
+            if member.backend_type == "in-process" or member.agent_id in self.pane_supervisor.workers:
+                continue
+            row = rows.get(member.agent_id)
+            if row is not None:
+                member.is_active = row.is_active
+                if member.progress is None:
+                    member.progress = TeammateProgress(member.name, team.name)
+                member.progress.status = row.status
 
     def get_mailbox(self, team_name: str) -> Mailbox | None:
         if team_name in self._mailboxes:
@@ -239,6 +263,13 @@ class TeamManager:
     def register_pane_id(self, agent_id: str, pane_id: str) -> None:
         self._pane_ids[agent_id] = pane_id
 
+    def register_pane_worker(self, team_name, member, launch, pane_id) -> None:
+        self.pane_supervisor.register(team_name, member, launch, pane_id)
+        self.register_pane_id(member.agent_id, pane_id)
+
+    async def close(self) -> None:
+        await self.pane_supervisor.close()
+
 
     def get_pane_id(self, agent_id: str) -> str | None:
         return self._pane_ids.get(agent_id)
@@ -254,6 +285,7 @@ class TeamManager:
             raise TeamError(f"Cannot delete team: active members: {names}")
 
         for member in list(team.members):
+            self.pane_supervisor.stop_member(member.agent_id)
             AgentNameRegistry.instance().unregister(member.name)
 
             runtime = self._inprocess_tasks.pop(member.agent_id, None)
@@ -349,6 +381,9 @@ class TeamManager:
         try:
             if backend_type == BackendType.TMUX.value:
                 from valecode.teams.spawn_tmux import kill_pane
+                kill_pane(pane_id)
+            elif backend_type == BackendType.ITERM2.value:
+                from valecode.teams.spawn_iterm2 import kill_pane
                 kill_pane(pane_id)
         except Exception as e:
             log.warning("Failed to kill pane %s: %s", pane_id, e)

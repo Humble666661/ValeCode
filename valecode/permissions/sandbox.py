@@ -14,6 +14,7 @@ class PathSandbox:
         ".valecode/config.yaml",
         ".valecode/permissions.local.yaml",
         ".valecode/session-permissions/",
+        ".valecode/pane-workers/",
         ".valecode/skills/",
     ]
 

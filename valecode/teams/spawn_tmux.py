@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import logging
+import os
+import re
+import shlex
 import subprocess
+import sys
 from dataclasses import dataclass
-
-log = logging.getLogger(__name__)
+from pathlib import Path
 
 
 @dataclass
@@ -18,81 +20,38 @@ class TmuxSpawnError(Exception):
 
 
 def _run_tmux(*args: str) -> str:
-    result = subprocess.run(
-        ["tmux", *args],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    result = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
-        raise TmuxSpawnError(f"tmux {' '.join(args)} failed: {result.stderr.strip()}")
+        raise TmuxSpawnError(result.stderr.strip() or "tmux failed")
     return result.stdout.strip()
 
 
-def build_cli_command(
-    team_name: str,
-    teammate_name: str,
-    worktree_path: str,
-    prompt: str,
-    agent_type: str = "",
-    model: str = "",
-    mailbox_dir: str = "",
-) -> str:
-    parts = ["valecode", "-p"]
-    parts.extend(["--work-dir", worktree_path])
-    if agent_type:
-        parts.extend(["--agent-type", agent_type])
-    if model:
-        parts.extend(["--model", model])
-    env_parts = [
-        f"VALECODE_TEAM_NAME={team_name}",
-        f"VALECODE_TEAMMATE_NAME={teammate_name}",
-    ]
-    if mailbox_dir:
-        env_parts.append(f"VALECODE_MAILBOX_DIR={mailbox_dir}")
-    env_prefix = " ".join(env_parts)
-    cmd = " ".join(parts)
-    full_prompt = prompt.replace("'", "'\\''")
-    return f"{env_prefix} {cmd} '{full_prompt}'"
+def build_cli_command(launch_path: str | Path) -> str:
+    # No prompt, keys or environment assignments reach the shell.
+    return shlex.join([sys.executable, "-m", "valecode", "--teammate-launch", str(launch_path)])
 
 
-def spawn_tmux_teammate(
-    team_name: str,
-    teammate_name: str,
-    worktree_path: str,
-    prompt: str,
-    agent_type: str = "",
-    model: str = "",
-    mailbox_dir: str = "",
-) -> TmuxPaneInfo:
-    window_name = f"{team_name}-{teammate_name}"
-
-    cli_cmd = build_cli_command(
-        team_name=team_name,
-        teammate_name=teammate_name,
-        worktree_path=worktree_path,
-        prompt=prompt,
-        agent_type=agent_type,
-        model=model,
-        mailbox_dir=mailbox_dir,
-    )
-
-    # Create a new tmux window (not split) for the teammate, matching Go
-    _run_tmux("new-window", "-d", "-n", window_name, cli_cmd)
-
-    log.info("Spawned tmux teammate %s in window %s", teammate_name, window_name)
-    return TmuxPaneInfo(pane_id=window_name, session=team_name)
+def spawn_tmux_teammate(launch_path: str | Path, root: str | Path, label: str) -> TmuxPaneInfo:
+    slug = re.sub(r"[^A-Za-z0-9_-]", "-", label)[:60] or "worker"
+    name = f"valecode-{slug}-{Path(launch_path).stem[:8]}"
+    command = build_cli_command(launch_path)
+    if os.environ.get("TMUX"):
+        pane = _run_tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-n", name, "-c", str(root), command)
+        session = "current"
+    else:
+        pane = _run_tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", str(root), command)
+        session = name
+    if not re.fullmatch(r"%[0-9]+", pane):
+        raise TmuxSpawnError("tmux did not return an exact pane ID")
+    return TmuxPaneInfo(pane, session)
 
 
 def send_keys_to_pane(pane_id: str, keys: str = "") -> None:
-    try:
-        _run_tmux("send-keys", "-t", pane_id, keys, "Enter")
-    except TmuxSpawnError:
-        log.warning("Failed to send keys to tmux pane %s", pane_id)
+    # Workers poll their mailbox; never send Enter into their process/shell.
+    return None
 
 
 def kill_pane(pane_id: str) -> None:
-    try:
-        _run_tmux("kill-pane", "-t", pane_id)
-    except TmuxSpawnError:
-        pass
+    if not re.fullmatch(r"%[0-9]+", pane_id):
+        raise TmuxSpawnError("Refusing an ambiguous tmux target")
+    _run_tmux("kill-pane", "-t", pane_id)

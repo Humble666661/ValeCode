@@ -839,11 +839,11 @@ class TestAgentNameRegistry:
 # =====================================================================
 
 class TestBackendDetect:
-    @pytest.mark.parametrize("mode", ["tmux", "iterm2", "auto", "invalid"])
+    @pytest.mark.parametrize("mode", ["auto", "invalid"])
     def test_unsupported_runtime_rejected_after_default_detection(self, mode):
         manager = TeamManager()
         assert manager.detect_backend() == BackendType.IN_PROCESS
-        with pytest.raises(BackendDetectionError, match="not implemented"):
+        with pytest.raises(BackendDetectionError, match="Unsupported"):
             manager.detect_backend(mode)
 
     def test_in_process_mode(self):
@@ -863,31 +863,21 @@ class TestBackendDetect:
     def test_pane_tmux_session(self):
         with patch.dict(os.environ, {"TMUX": "/tmp/tmux-1234/default,12345,0"}):
             result = detect_pane_backend()
-            assert result == BackendType.TMUX
+            assert result == BackendType.IN_PROCESS
 
-    def test_pane_iterm2_with_it2(self):
+    def test_pane_iterm2_explicit_official_api(self):
         env = {"TERM_PROGRAM": "iTerm.app"}
         with patch.dict(os.environ, env, clear=False):
-            with patch("valecode.teams.backend_detect.shutil.which") as mock_which:
-                def which_side_effect(cmd):
-                    if cmd == "it2":
-                        return "/usr/local/bin/it2"
-                    if cmd == "tmux":
-                        return None
-                    return None
-                mock_which.side_effect = which_side_effect
-                with patch.dict(os.environ, {"TMUX": ""}, clear=False):
-                    os.environ.pop("TMUX", None)
-                    result = detect_pane_backend()
-                    assert result == BackendType.ITERM2
+            with patch("valecode.teams.backend_detect.sys.platform", "darwin"), patch("valecode.teams.backend_detect.importlib.util.find_spec", return_value=object()):
+                assert detect_pane_backend("iterm2") == BackendType.ITERM2
 
     def test_pane_tmux_installed_not_in_session(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TMUX", None)
             os.environ.pop("TERM_PROGRAM", None)
-            with patch("valecode.teams.backend_detect.shutil.which") as mock_which:
+            with patch("valecode.teams.backend_detect.sys.platform", "linux"), patch("valecode.teams.backend_detect.shutil.which") as mock_which:
                 mock_which.return_value = "/usr/bin/tmux"
-                result = detect_pane_backend()
+                result = detect_pane_backend("tmux")
                 assert result == BackendType.TMUX
 
     def test_pane_no_backend_falls_back_to_in_process(self):

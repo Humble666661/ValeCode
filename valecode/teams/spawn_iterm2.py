@@ -1,11 +1,11 @@
-
+"""Official iTerm2 API bridge, isolated from the parent's asyncio loop."""
 from __future__ import annotations
 
-import logging
+import shlex
 import subprocess
+import sys
 from dataclasses import dataclass
-
-log = logging.getLogger(__name__)
+from pathlib import Path
 
 
 @dataclass
@@ -17,43 +17,45 @@ class ITermSpawnError(Exception):
     pass
 
 
-def _run_it2(*args: str) -> str:
-    result = subprocess.run(
-        ["it2", *args],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+def _bridge(operation: str, target: str, root: str = "") -> str:
+    result = subprocess.run([sys.executable, "-m", "valecode.teams.spawn_iterm2", operation, target, root],
+        capture_output=True, text=True, timeout=20)
     if result.returncode != 0:
-        raise ITermSpawnError(f"it2 {' '.join(args)} failed: {result.stderr.strip()}")
-    return result.stdout.strip()
+        raise ITermSpawnError(result.stderr.strip() or "iTerm2 API request failed")
+    value = next((line[9:] for line in result.stdout.splitlines() if line.startswith("VALECODE:")), "")
+    if not value or len(value) > 256 or any(c.isspace() for c in value):
+        raise ITermSpawnError("iTerm2 did not return a session identity")
+    return value
 
 
-def spawn_iterm2_teammate(
-    team_name: str,
-    teammate_name: str,
-    worktree_path: str,
-    prompt: str,
-    agent_type: str = "",
-    model: str = "",
-    mailbox_dir: str = "",
-) -> ITermPaneInfo:
-    from valecode.teams.spawn_tmux import build_cli_command
+def spawn_iterm2_teammate(launch_path: str | Path, root: str | Path, label: str) -> ITermPaneInfo:
+    return ITermPaneInfo(_bridge("spawn", str(launch_path), str(root)))
 
-    cli_cmd = build_cli_command(
-        team_name=team_name,
-        teammate_name=teammate_name,
-        worktree_path=worktree_path,
-        prompt=prompt,
-        agent_type=agent_type,
-        model=model,
-        mailbox_dir=mailbox_dir,
-    )
 
-    try:
-        session_id = _run_it2("split-pane", "--command", f"/bin/zsh -c '{cli_cmd}'")
-    except ITermSpawnError as e:
-        raise ITermSpawnError(f"Failed to spawn iTerm2 pane for {teammate_name}: {e}") from e
+def kill_pane(session_id: str) -> None:
+    _bridge("close", session_id)
 
-    log.info("Spawned iTerm2 teammate %s in session %s", teammate_name, session_id)
-    return ITermPaneInfo(session_id=session_id)
+
+async def _request(connection, operation: str, target: str, root: str, api):
+    if operation == "spawn":
+        from valecode.teams.spawn_tmux import build_cli_command
+        shell = f"cd {shlex.quote(root)} && exec {build_cli_command(target)}"
+        window = await api.Window.async_create(connection, command=shlex.join(["/bin/sh", "-c", shell]))
+        if window is None or window.current_tab is None or window.current_tab.current_session is None:
+            raise ITermSpawnError("Created window has no session")
+        return window.current_tab.current_session.session_id
+    if operation == "close":
+        app = await api.async_get_app(connection)
+        session = app.get_session_by_id(target)
+        if session is not None:
+            await session.async_close(force=True)
+        return target
+    raise ITermSpawnError("Unknown operation")
+
+
+if __name__ == "__main__":
+    import iterm2
+    async def main(connection):
+        value = await _request(connection, sys.argv[1], sys.argv[2], sys.argv[3], iterm2)
+        print("VALECODE:" + value, flush=True)
+    iterm2.run_until_complete(main)

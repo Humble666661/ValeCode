@@ -162,12 +162,13 @@ def build_teammate_tools(
     from valecode.tools.task_list import TaskListTool
     from valecode.tools.task_update import TaskUpdateTool
 
-    if backend_type == BackendType.IN_PROCESS.value:
+    if backend_type in {item.value for item in BackendType}:
         all_tools = {t.name: t for t in parent_registry.list_tools()}
         filtered = {
             name: tool
             for name, tool in all_tools.items()
             if name in IN_PROCESS_TEAMMATE_ALLOWED_TOOLS
+            or (parent_registry.get_registration(name).source == ToolSource.MCP)
         }
     else:
         filtered = {t.name: t for t in parent_registry.list_tools()}

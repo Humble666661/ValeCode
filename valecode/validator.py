@@ -13,7 +13,7 @@ VALID_PERMISSION_MODES = {
     "bypassPermissions",
 }
 
-VALID_TEAMMATE_MODES = {"", "in-process"}
+VALID_TEAMMATE_MODES = {"", "in-process", "tmux", "iterm2"}
 
 DEFAULT_CONTEXT_WINDOW = 200_000
 

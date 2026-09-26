@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
+import importlib.util
 
 from valecode.teams.models import BackendType
 
@@ -10,56 +12,29 @@ class BackendDetectionError(Exception):
     pass
 
 
-def _in_tmux_session() -> bool:
-    return bool(os.environ.get("TMUX"))
-
-
-def _in_iterm2() -> bool:
-    return os.environ.get("TERM_PROGRAM") == "iTerm.app"
-
-
-def _it2_available() -> bool:
-    return shutil.which("it2") is not None
-
-
-def _tmux_installed() -> bool:
-    return shutil.which("tmux") is not None
-
-
 def detect_backend(
     teammate_mode: str = "",
     is_interactive: bool = True,
 ) -> BackendType:
-    """Only select backends supported by the current teammate runtime."""
-    if teammate_mode not in ("", "in-process"):
-        raise BackendDetectionError(
-            f"Unsupported teammate backend '{teammate_mode}': independent pane "
-            "workers are not implemented. Use teammate_mode: in-process."
-        )
-    return BackendType.IN_PROCESS
+    """External terminal creation is explicit; environment never enables it."""
+    if teammate_mode in ("", "in-process"):
+        return BackendType.IN_PROCESS
+    if not is_interactive:
+        raise BackendDetectionError("Pane teammates require an interactive local session")
+    if teammate_mode == "tmux":
+        if sys.platform == "win32" or shutil.which("tmux") is None:
+            raise BackendDetectionError("tmux requires POSIX with tmux installed; use in-process on native Windows")
+        return BackendType.TMUX
+    if teammate_mode == "iterm2":
+        if sys.platform != "darwin" or os.environ.get("TERM_PROGRAM") != "iTerm.app" or importlib.util.find_spec("iterm2") is None:
+            raise BackendDetectionError("iTerm2 requires macOS, iTerm.app and the iterm2 Python package/API enabled")
+        return BackendType.ITERM2
+    raise BackendDetectionError(f"Unsupported teammate backend '{teammate_mode}'")
 
 
 def detect_pane_backend(
     teammate_mode: str = "",
     is_interactive: bool = True,
 ) -> BackendType:
-    """检测 pane 后端，对齐 Go 的 detectPaneBackend。
-
-    优先级：tmux（已在 session 内）> iTerm2 > tmux（已安装）> in-process 兜底。
-    当没有任何外部终端复用器可用时，静默回退到 in-process，而不是抛异常。
-    """
-    if teammate_mode == "in-process" or not is_interactive:
-        return BackendType.IN_PROCESS
-
-    if _in_tmux_session():
-        return BackendType.TMUX
-
-    if _in_iterm2() and _it2_available():
-        return BackendType.ITERM2
-
-    if _tmux_installed():
-        return BackendType.TMUX
-
-    # 对齐 Go：没有可用的 pane 后端时静默回退到 in-process，
-    # 而不是抛出异常中断 team 创建流程
-    return BackendType.IN_PROCESS
+    """Compatibility alias; no automatic discovery or silent fallback."""
+    return detect_backend(teammate_mode, is_interactive)

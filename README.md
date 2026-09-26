@@ -21,7 +21,14 @@ Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
 - **多 Agent 协作**：支持 Sub-Agent、后台 Agent、Agent Team、结构化邮箱事件以及
   Git Worktree 隔离；共享任务板支持依赖、优先级与百分比进度，消息仅在所属 Team 内路由；
   TUI 可读取队友的实时工具、Token 与状态进度，Team 删除会收口实际运行中的进程内任务。
-  当前队友运行后端为 `in-process`；独立 tmux/iTerm2 worker 尚未支持。
+  默认队友后端为 `in-process`；本地交互会话可显式配置 `teammate_mode: tmux`
+  或 `iterm2` 启动独立成员进程。tmux 需要 POSIX 环境和已安装的 tmux；iTerm2
+  需要 macOS、当前 iTerm.app、同一 Python 环境安装 `iterm2` 并启用
+  [Python API](https://iterm2.com/python-api/tutorial/running.html)。原生 Windows 使用进程内模式。
+  独立成员使用隔离 worktree、父 Session/Run 与共享邮箱；启动描述不含模型密钥。
+  不继承一次性/会话授权，不提升父权限，待人工批准的操作会拒绝执行。父进程退出或
+  心跳失联会停止成员，不自动重放；退出不会删除成员 worktree。pane 模式需指定
+  `subagent_type`（不支持对话 fork），配置须能从父项目标准 `.env`/YAML 加载。
 - **上下文与结果管理**：支持上下文压缩、可验证 Checkpoint、工具调用链对齐、
   超长结果卸载和引用感知清理。
 - **可观测性**：模型、工具、权限、Hook、压缩、恢复和任务调度均可输出
@@ -392,7 +399,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **938 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **967 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

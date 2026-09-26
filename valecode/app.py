@@ -914,11 +914,15 @@ class ValeCodeApp(App):
         from valecode.tools.team_delete import TeamDeleteTool
         from valecode.tools.lead_tasks import build_lead_task_tools
 
-        self.team_manager = TeamManager(
-            worktree_manager=self.worktree_manager,
-            trace_manager=self.trace_manager,
-            task_store=self.session_manager.task_store,
-        )
+        if getattr(self, "team_manager", None) is None:
+            self.team_manager = TeamManager(
+                worktree_manager=self.worktree_manager,
+                trace_manager=self.trace_manager,
+                task_store=self.session_manager.task_store,
+            )
+        else:
+            # Provider changes must not abandon existing worker leases.
+            self.team_manager._worktree_manager = self.worktree_manager
 
         self.agent_tool = AgentTool(
             agent_loader=self.agent_loader,
@@ -2084,6 +2088,8 @@ class ValeCodeApp(App):
         self._exit_requested = True
 
         async def _cleanup() -> None:
+            if self.team_manager is not None:
+                await self.team_manager.close()
             if self.cron_runtime is not None:
                 await self.cron_runtime.close()
             tasks: list[asyncio.Task] = []
@@ -2129,15 +2135,8 @@ class ValeCodeApp(App):
             if self._stale_cleanup_task and not self._stale_cleanup_task.done():
                 self._stale_cleanup_task.cancel()
 
-            if hasattr(self, 'team_manager'):
-                for name in list(self.team_manager._teams):
-                    try:
-                        team = self.team_manager._teams[name]
-                        for m in team.members:
-                            team.set_member_active(m.name, False)
-                        self.team_manager.delete_team(name)
-                    except Exception:
-                        pass
+            # Exiting the UI is not authorization to force-delete worktrees.
+            # TeamDelete remains an explicit operation.
 
             if self.session:
                 self.session.close()

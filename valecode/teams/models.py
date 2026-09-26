@@ -14,16 +14,18 @@ from valecode.teams.progress import TeammateProgress
 
 _team_root_override: Path | None = None
 _team_root_override_home: Path | None = None
+_team_root_override_state_dir: str | None = None
 
 
 def _team_root() -> Path:
     current_home = Path.home()
+    configured = os.environ.get("VALECODE_STATE_DIR", "").strip()
     if (
         _team_root_override is not None
         and _team_root_override_home == current_home
+        and _team_root_override_state_dir == configured
     ):
         return _team_root_override
-    configured = os.environ.get("VALECODE_STATE_DIR", "").strip()
     state_root = Path(configured).expanduser() if configured else current_home / ".valecode"
     return state_root / "teams"
 
@@ -31,8 +33,9 @@ def _team_root() -> Path:
 def use_fallback_team_root() -> Path:
     """Switch team state to a writable fallback after a home access failure."""
 
-    global _team_root_override, _team_root_override_home
+    global _team_root_override, _team_root_override_home, _team_root_override_state_dir
     _team_root_override_home = Path.home()
+    _team_root_override_state_dir = os.environ.get("VALECODE_STATE_DIR", "").strip()
     _team_root_override = Path(tempfile.gettempdir()) / "valecode" / "teams"
     return _team_root_override
 
@@ -84,6 +87,7 @@ class AgentTeam:
     members: list[TeammateInfo] = field(default_factory=list)
     config_path: str = ""
     description: str = ""
+    backend_type: str = "in-process"
 
     def get_member(self, name: str) -> TeammateInfo | None:
         for m in self.members:
@@ -124,6 +128,7 @@ class AgentTeam:
             "members": [m.to_dict() for m in self.members],
             "config_path": self.config_path,
             "description": self.description,
+            "backend_type": self.backend_type,
         }
 
 
@@ -136,6 +141,7 @@ class AgentTeam:
             members=members,
             config_path=data.get("config_path", ""),
             description=data.get("description", ""),
+            backend_type=data.get("backend_type", "in-process"),
         )
 
     def save(self) -> None:

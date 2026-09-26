@@ -552,15 +552,14 @@ class AgentTool(Tool):
         from valecode.teams.backend_detect import BackendDetectionError
 
         try:
-            backend = self._team_manager.detect_backend()
+            backend = self._team_manager.detect_backend(team.backend_type)
         except BackendDetectionError as exc:
             return ToolResult(output=str(exc), is_error=True)
         if backend != BackendType.IN_PROCESS:
-            return ToolResult(
-                output="Independent pane teammates are not implemented. "
-                "Use teammate_mode: in-process.",
-                is_error=True,
-            )
+            if self._provider_config is None or self._team_manager._team_store is None or not self._parent_agent.session_id:
+                return ToolResult(output="Pane workers require a configured provider and a durable parent session.", is_error=True)
+            if self._enable_fork and not p.subagent_type:
+                return ToolResult(output="Pane workers require subagent_type; conversation forks remain in-process.", is_error=True)
 
         base_name = p.name or p.subagent_type or "worker"
         existing_names = {m.name for m in team.members}
@@ -603,7 +602,7 @@ class AgentTool(Tool):
                 disallowed_tools=[],
                 model="inherit",
                 max_turns=self._parent_agent.max_iterations,
-                permission_mode="bypassPermissions",
+                permission_mode="default",
                 source="builtin",
             )
 
@@ -653,8 +652,9 @@ class AgentTool(Tool):
         checker = PermissionChecker(
             detector=DangerousCommandDetector(),
             sandbox=PathSandbox(wt.path),
-            rule_engine=RuleEngine(),
-            mode=PermissionMode.BYPASS,
+            rule_engine=(self._parent_agent.permission_checker.rule_engine.clone()
+                if self._parent_agent.permission_checker is not None else RuleEngine()),
+            mode=self._teammate_permission_mode(definition),
         )
 
         sub_agent = AgentClass(
@@ -669,6 +669,9 @@ class AgentTool(Tool):
             hook_engine=self._parent_agent.hook_engine,
         )
         self._inherit_runtime_state(sub_agent)
+        selected_model = getattr(client, "model", None)
+        if isinstance(selected_model, str) and selected_model:
+            sub_agent.model = selected_model
         sub_agent.agent_type = definition.agent_type
         sub_agent.agent_id = agent_id
         sub_agent.team_name = p.team_name
@@ -697,8 +700,8 @@ class AgentTool(Tool):
 
         # 8. 按后端类型启动队友
         if backend in (BackendType.TMUX, BackendType.ITERM2):
-            return self._spawn_pane_teammate(
-                p, team, member, backend, wt, agent_id, teammate_name
+            return await self._spawn_pane_teammate(
+                p, team, member, backend, wt, agent_id, teammate_name, definition, sub_agent
             )
 
         # 进程内模式：直接用 task_manager 执行并通知结果
@@ -725,41 +728,79 @@ class AgentTool(Tool):
         )
 
 
-    def _spawn_pane_teammate(
+    def _teammate_permission_mode(self, definition):
+        from valecode.permissions import PermissionMode
+        parent = getattr(self._parent_agent.permission_checker, "mode", PermissionMode.DEFAULT)
+        requested = PermissionMode(definition.permission_mode or "default")
+        if parent == PermissionMode.PLAN:
+            return parent
+        order = {PermissionMode.DEFAULT: 0, PermissionMode.ACCEPT_EDITS: 1, PermissionMode.BYPASS: 2}
+        return min((parent, requested), key=order.get)
+
+    async def _spawn_pane_teammate(
         self, p: Any, team: Any, member: Any, backend: Any, wt: Any,
-        agent_id: str, teammate_name: str,
+        agent_id: str, teammate_name: str, definition: Any, sub_agent: Any,
     ) -> ToolResult:
         from valecode.teams.models import BackendType
 
         mailbox = self._team_manager.get_mailbox(p.team_name)
         mailbox_dir = str(mailbox._base_dir) if mailbox else ""
-
+        from valecode.teams.worker_launch import WorkerLaunch
+        launch = None
+        pane_id = None
+        async def spawn_owned(spawn):
+            pending = asyncio.create_task(asyncio.to_thread(spawn, launch.path, root, teammate_name))
+            try:
+                return await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                launch.heartbeat_parent(stop=True)
+                try:
+                    info = await pending
+                    identity = getattr(info, "pane_id", None) or info.session_id
+                    await asyncio.to_thread(self._team_manager._kill_pane, identity, backend.value)
+                except Exception:
+                    log.exception("Cancelled pane launch cleanup failed")
+                raise
         try:
+            from pathlib import Path
+            root = Path(self._worktree_manager.repo_root)
+            bash = self._parent_agent.registry.get("Bash")
+            sandbox_config = getattr(bash, "sandbox_config", None)
+            launch = WorkerLaunch.prepare(root, dict(
+                session_id=sub_agent.session_id, team_name=p.team_name, agent_id=agent_id,
+                member_name=teammate_name, lead_id=team.lead_agent_id, work_dir=wt.path,
+                provider_name=self._provider_config.name, model=sub_agent.model or self._provider_config.model,
+                prompt=p.prompt, definition=self._resume_spec(definition, p.model),
+                allowed_tools=[tool.name for tool in sub_agent.registry.list_tools()],
+                permission_mode=sub_agent.permission_checker.mode.value, mailbox_dir=mailbox_dir,
+                parent_run_id=sub_agent.parent_run_id, trace_id=sub_agent.trace_id,
+                sandbox={"enabled": getattr(bash, "sandbox", None) is not None,
+                    "network_enabled": bool(getattr(sandbox_config, "network_enabled", False)),
+                    "auto_allow": bool(getattr(self._parent_agent.permission_checker, "sandbox_enabled", False))},
+            ))
             if backend == BackendType.TMUX:
                 from valecode.teams.spawn_tmux import spawn_tmux_teammate
-                pane_info = spawn_tmux_teammate(
-                    team_name=p.team_name,
-                    teammate_name=teammate_name,
-                    worktree_path=wt.path,
-                    prompt=p.prompt,
-                    agent_type=p.subagent_type or "",
-                    model=p.model or "",
-                    mailbox_dir=mailbox_dir,
-                )
-                self._team_manager.register_pane_id(agent_id, pane_info.pane_id)
+                pane_info = await spawn_owned(spawn_tmux_teammate)
+                pane_id = pane_info.pane_id
             elif backend == BackendType.ITERM2:
                 from valecode.teams.spawn_iterm2 import spawn_iterm2_teammate
-                pane_info = spawn_iterm2_teammate(
-                    team_name=p.team_name,
-                    teammate_name=teammate_name,
-                    worktree_path=wt.path,
-                    prompt=p.prompt,
-                    agent_type=p.subagent_type or "",
-                    model=p.model or "",
-                    mailbox_dir=mailbox_dir,
-                )
-        except Exception as e:
-            log.warning("Pane spawn failed, falling back to in-process: %s", e)
+                pane_info = await spawn_owned(spawn_iterm2_teammate)
+                pane_id = pane_info.session_id
+            member.progress.status = "starting"
+            self._team_manager.register_pane_worker(p.team_name, member, launch, pane_id)
+        except (Exception, asyncio.CancelledError) as e:
+            log.warning("Pane spawn failed; no fallback or replay: %s", e)
+            if launch is not None:
+                launch.heartbeat_parent(stop=True)
+            if pane_id is not None:
+                await asyncio.to_thread(self._team_manager._kill_pane, pane_id, backend.value)
+            member.is_active = False
+            member.progress.status = "failed"
+            team.save()
+            self._team_manager._team_store.set_member_active(p.team_name, agent_id, False)
+            self._trace_manager.complete(agent_id, "failed")
+            if isinstance(e, asyncio.CancelledError):
+                raise
             return ToolResult(
                 output=f"Pane spawn failed ({e}), teammate not started. Retry or set teammate_mode to in-process.",
                 is_error=True,
@@ -771,7 +812,7 @@ class AgentTool(Tool):
                 f"Agent ID: {agent_id}\n"
                 f"Backend: {backend.value} (pane)\n"
                 f"Worktree: {wt.path}\n"
-                f"The teammate is running in an independent process."
+                f"Independent worker launch requested; starting until its heartbeat confirms running."
             )
         )
 

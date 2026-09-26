@@ -37,8 +37,9 @@ class ExitWorktreeTool(Tool):
     should_defer = True
 
 
-    def __init__(self, worktree_manager: WorktreeManager) -> None:
+    def __init__(self, worktree_manager: WorktreeManager, on_change=None) -> None:
         self._manager = worktree_manager
+        self._on_change = on_change
 
 
     async def execute(self, params: ExitWorktreeParams) -> ToolResult:
@@ -97,6 +98,8 @@ class ExitWorktreeTool(Tool):
                 output=f"Error exiting worktree: {e}", is_error=True
             )
 
+        if self._on_change is not None:
+            self._on_change()
         if action == "keep":
             return ToolResult(
                 output=(

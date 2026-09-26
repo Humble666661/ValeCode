@@ -18,6 +18,9 @@ Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
   全局和 Team 级并发控制；`TaskDispatch` 可把共享看板任务显式链接到执行实例。
 - **可组合工具系统**：Built-in、Plugin、MCP 和 Session 四层 Registry，配合
   Skills、Hooks、权限规则和资源生命周期管理。
+- **统一执行装配**：三个入口共用子 Agent/Team/Worktree/Cron 的组件工厂和逐资源清理。
+  Remote 支持进程内 Team、Worktree、问答与计划审批；计划需明确批准才执行，
+  修改内容会使旧批准失效，批准不提升权限。浏览器操作仍在运行 ValeCode 的本机执行。
 - **多 Agent 协作**：支持 Sub-Agent、后台 Agent、Agent Team、结构化邮箱事件以及
   Git Worktree 隔离；共享任务板支持依赖、优先级与百分比进度，消息仅在所属 Team 内路由；
   TUI 可读取队友的实时工具、Token 与状态进度，Team 删除会收口实际运行中的进程内任务。
@@ -399,7 +402,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **967 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **980 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

@@ -34,8 +34,9 @@ class EnterWorktreeTool(Tool):
     should_defer = True
 
 
-    def __init__(self, worktree_manager: WorktreeManager) -> None:
+    def __init__(self, worktree_manager: WorktreeManager, on_change=None) -> None:
         self._manager = worktree_manager
+        self._on_change = on_change
 
 
     async def execute(self, params: EnterWorktreeParams) -> ToolResult:
@@ -59,6 +60,8 @@ class EnterWorktreeTool(Tool):
             )
 
         branch_info = f" on branch {wt.branch}" if wt.branch else ""
+        if self._on_change is not None:
+            self._on_change()
         return ToolResult(
             output=(
                 f"Created worktree at {session.worktree_path}{branch_info}. "

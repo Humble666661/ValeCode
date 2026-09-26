@@ -394,6 +394,10 @@ function handleMessage(msg) {
       addAskUserDialog(msg.data);
       break;
 
+    case 'plan_approval':
+      addPlanDialog(msg.data);
+      break;
+
     case 'turn_complete':
       break;
 
@@ -641,57 +645,82 @@ function addAskUserDialog(data) {
   div.className = 'perm-dialog';
   div.id = 'ask-' + data.id;
 
-  let html = '<div class="title">❓ Question</div>';
+  if (document.getElementById(div.id)) return;
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = '请回答';
+  div.appendChild(title);
   const questions = data.questions || [];
+  const fields = [];
   questions.forEach((q, qi) => {
-    html += '<div style="margin-bottom:12px;">';
-    html += '<div style="margin-bottom:6px;color:var(--text-bright);">' + escapeHtml(q.question || q.Text || '') + '</div>';
-    const options = q.options || q.Options || [];
-    options.forEach((opt, oi) => {
-      const label = opt.label || opt.Label || '';
-      const desc = opt.description || opt.Description || '';
-      html += '<label style="display:block;margin:4px 0;cursor:pointer;">' +
-        '<input type="radio" name="ask_' + data.id + '_' + qi + '" value="' + escapeHtml(label) + '"> ' +
-        '<span style="color:var(--blue)">' + escapeHtml(label) + '</span>' +
-        (desc ? ' <span style="color:var(--text-dim);font-size:12px;">— ' + escapeHtml(desc) + '</span>' : '') +
-        '</label>';
+    const group = document.createElement('div');
+    group.style.marginBottom = '12px';
+    const label = document.createElement('div');
+    label.textContent = q.message;
+    group.appendChild(label);
+    const choices = [];
+    (q.options || []).forEach(opt => {
+      const optionLabel = document.createElement('label');
+      optionLabel.style.display = 'block';
+      const input = document.createElement('input');
+      input.type = q.type === 'checkbox' ? 'checkbox' : 'radio';
+      input.name = 'ask_' + data.id + '_' + qi;
+      input.value = opt;
+      optionLabel.appendChild(input);
+      optionLabel.appendChild(document.createTextNode(' ' + opt));
+      group.appendChild(optionLabel);
+      choices.push(input);
     });
-    // Other 选项
-    html += '<label style="display:block;margin:4px 0;cursor:pointer;">' +
-      '<input type="radio" name="ask_' + data.id + '_' + qi + '" value="__other__"> ' +
-      '<span style="color:var(--text-dim)">Other: </span>' +
-      '<input type="text" id="ask_other_' + data.id + '_' + qi + '" style="background:var(--bg-input);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-family:inherit;font-size:13px;width:300px;">' +
-      '</label>';
-    html += '</div>';
+    const text = document.createElement('input');
+    text.type = 'text';
+    text.placeholder = choices.length ? '或直接输入回答' : '输入回答';
+    text.maxLength = 20000;
+    group.appendChild(text);
+    fields.push({ name: q.name, text, choices });
+    div.appendChild(group);
   });
-  html += '<div class="actions"><button class="btn-allow" onclick="respondAsk(\'' + data.id + '\',' + questions.length + ')">Submit</button></div>';
-
-  div.innerHTML = html;
+  const button = document.createElement('button');
+  button.className = 'btn-allow';
+  button.textContent = '提交回答';
+  button.onclick = () => {
+    const answers = Object.create(null);
+    fields.forEach(field => {
+      answers[field.name] = field.text.value || field.choices.filter(input => input.checked).map(input => input.value).join(', ');
+    });
+    ws.send(JSON.stringify({ type: 'ask_user_response', data: { id: data.id, answers } }));
+    div.textContent = '已回答';
+  };
+  div.appendChild(button);
   messagesEl.appendChild(div);
   scrollToBottom();
 }
 
-function respondAsk(id, qCount) {
-  const answers = {};
-  for (let i = 0; i < qCount; i++) {
-    const radios = document.querySelectorAll('input[name="ask_' + id + '_' + i + '"]');
-    let val = '';
-    radios.forEach(r => {
-      if (r.checked) {
-        if (r.value === '__other__') {
-          val = document.getElementById('ask_other_' + id + '_' + i).value;
-        } else {
-          val = r.value;
-        }
-      }
-    });
-    answers['question_' + i] = val;
-  }
-  ws.send(JSON.stringify({ type: 'ask_user_response', data: { id, answers } }));
-  const el = document.getElementById('ask-' + id);
-  if (el) {
-    el.innerHTML = '<div style="color:var(--text-dim)">✓ Answered</div>';
-  }
+function addPlanDialog(data) {
+  if (document.getElementById('plan-' + data.id)) return;
+  const div = document.createElement('div');
+  div.className = 'perm-dialog';
+  div.id = 'plan-' + data.id;
+  const title = document.createElement('div');
+  title.className = 'title';
+  title.textContent = '计划审批';
+  const content = document.createElement('pre');
+  content.style.whiteSpace = 'pre-wrap';
+  content.textContent = data.content;
+  const feedback = document.createElement('textarea');
+  feedback.placeholder = '修改意见（可选）';
+  feedback.maxLength = 20000;
+  div.append(title, content, feedback);
+  [['approve', '批准并执行'], ['feedback', '反馈并修改'], ['reject', '暂不执行']].forEach(([choice, label]) => {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.onclick = () => {
+      ws.send(JSON.stringify({ type: 'plan_response', data: { id: data.id, choice, feedback: feedback.value } }));
+      div.textContent = label + '：已提交';
+    };
+    div.appendChild(button);
+  });
+  messagesEl.appendChild(div);
+  scrollToBottom();
 }
 
 // 滚动控制

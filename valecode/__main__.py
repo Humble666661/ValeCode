@@ -137,6 +137,8 @@ def main() -> None:
                 enable_fork=config.enable_fork,
                 enable_verification_agent=config.enable_verification_agent,
                 background_task_config=config.background_tasks,
+                worktree_config=config.worktree,
+                enable_coordinator_mode=config.enable_coordinator_mode,
             )
         except ValueError as e:
             print(f"Remote config error: {e}", file=sys.stderr)
@@ -196,39 +198,19 @@ class _PromptResources:
         if self._closed:
             return
         self._closed = True
-        if self.team_manager is not None:
-            try:
-                await self.team_manager.close()
-            except Exception:
-                logging.warning("Failed to stop pane teammates", exc_info=True)
-        if self.cron_runtime is not None:
-            try:
-                await self.cron_runtime.close()
-            except Exception:
-                logging.warning("Failed to stop prompt Cron runtime", exc_info=True)
-        if self.mcp_manager is not None:
-            try:
-                await self.mcp_manager.shutdown()
-            except Exception:
-                logging.warning("Failed to shut down prompt MCP manager", exc_info=True)
-        if self.task_manager is not None:
-            try:
-                await self.task_manager.shutdown()
-            except Exception:
-                logging.warning("Failed to stop prompt task manager", exc_info=True)
-        if self.registry is not None:
-            try:
-                from valecode.tools import ToolSource
-
-                await self.registry.release_source(ToolSource.PLUGIN)
-                await self.registry.release_session()
-            except Exception:
-                logging.warning("Failed to release prompt tool session", exc_info=True)
-        if self.session is not None:
-            try:
-                self.session.close()
-            except Exception:
-                logging.warning("Failed to close prompt session", exc_info=True)
+        from valecode.runtime.harness import close_resources
+        from valecode.tools import ToolSource
+        async def close_session():
+            self.session.close()
+        await close_resources([
+            ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
+            ("teams", self.team_manager.close if self.team_manager is not None else None),
+            ("tasks", self.task_manager.shutdown if self.task_manager is not None else None),
+            ("mcp", self.mcp_manager.shutdown if self.mcp_manager is not None else None),
+            ("plugins", (lambda: self.registry.release_source(ToolSource.PLUGIN)) if self.registry is not None else None),
+            ("tool session", self.registry.release_session if self.registry is not None else None),
+            ("session", close_session if self.session is not None else None),
+        ])
 
 
 async def _run_prompt(
@@ -369,50 +351,19 @@ async def _run_prompt(
     registry.register(todo_tool)
     agent.set_todo_state_provider(todo_tool.current_summary)
 
-    wt_cfg = config.worktree or WorktreeConfig()
-    wt_manager = WorktreeManager(
-        repo_root=work_dir,
-        symlink_directories=wt_cfg.symlink_directories,
-    )
-    trace_manager = TraceManager()
-    task_manager = DurableTaskManager.from_config(
-        session_manager.task_store,
-        getattr(config, "background_tasks", None),
-    )
-    task_manager.start_maintenance()
+    from valecode.runtime.harness import HarnessOptions, assemble_harness
+    harness = assemble_harness(agent, session_manager, provider, registry,
+        options=HarnessOptions(enable_fork=config.enable_fork,
+            enable_verification=config.enable_verification_agent,
+            enable_coordinator=config.enable_coordinator_mode,
+            background_tasks=getattr(config, "background_tasks", None), worktree_config=config.worktree),
+        cron_start=True)
+    task_manager = harness.task_manager
+    team_manager = harness.team_manager
+    agent_tool = harness.agent_tool
     resources.task_manager = task_manager
-    agent_loader = AgentLoader(work_dir, enable_verification=config.enable_verification_agent)
-    agent_loader.load_all()
-    team_manager = TeamManager(
-        worktree_manager=wt_manager,
-        trace_manager=trace_manager,
-        task_store=session_manager.task_store,
-    )
     resources.team_manager = team_manager
-
-    agent_tool = AgentTool(
-        agent_loader=agent_loader,
-        task_manager=task_manager,
-        trace_manager=trace_manager,
-        parent_agent=agent,
-        enable_fork=config.enable_fork,
-        provider_config=provider,
-        worktree_manager=wt_manager,
-        team_manager=team_manager,
-    )
-    registry.register(agent_tool)
-    from valecode.runtime.cron import install_cron
-    resources.cron_runtime = install_cron(agent_tool, registry)
-    registry.register(TeamCreateTool(
-        team_manager=team_manager,
-        parent_agent=agent,
-        teammate_mode="in-process",
-        is_interactive=False,
-        enable_coordinator_mode=config.enable_coordinator_mode,
-    ))
-    registry.register(TeamDeleteTool(team_manager=team_manager, parent_agent=agent))
-    for task_tool in build_lead_task_tools(team_manager, agent.agent_id, agent_tool):
-        registry.register(task_tool)
+    resources.cron_runtime = harness.cron_runtime
 
     def drain_notifications() -> list[str]:
         notes: list[str] = []

@@ -119,7 +119,8 @@ async def _handle_enter(
     try:
         session = await manager.enter(name)
         if ctx.agent:
-            ctx.agent.work_dir = session.worktree_path
+            from valecode.runtime.harness import sync_worktree_context
+            sync_worktree_context(ctx.agent, manager)
         ctx.ui.add_system_message(f"已进入 worktree: {name}\n路径: {session.worktree_path}")
     except Exception as e:
         ctx.ui.add_system_message(f"进入 worktree 失败: {e}")
@@ -142,7 +143,8 @@ async def _handle_exit(
     try:
         await manager.exit(session.worktree_name, action=action, discard_changes=discard)
         if ctx.agent:
-            ctx.agent.work_dir = session.original_cwd
+            from valecode.runtime.harness import sync_worktree_context
+            sync_worktree_context(ctx.agent, manager)
         msg = f"已退出 worktree: {session.worktree_name}"
         if remove:
             msg += "（已删除）"

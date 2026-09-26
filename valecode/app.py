@@ -653,6 +653,7 @@ class ValeCodeApp(App):
         self.cron_runtime = None
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
+        self.team_manager = None
         self._notification_check_task: asyncio.Task[None] | None = None
         self.worktree_manager: WorktreeManager | None = None
         self._stale_cleanup_task: asyncio.Task[None] | None = None
@@ -794,7 +795,7 @@ class ValeCodeApp(App):
         self.registry.register(
             ToolSearchTool(self.registry, protocol=provider.protocol)
         )
-        self.registry.register(AskUserTool())
+        self.registry.register(AskUserTool(self._handle_askuser))
 
         from valecode.tools.exit_plan_mode import ExitPlanModeTool
         self._exit_plan_tool = ExitPlanModeTool()
@@ -902,89 +903,21 @@ class ValeCodeApp(App):
             )
         )
 
-        # --- 子 agent 系统初始化 ---
-        self.agent_loader = AgentLoader(
-            work_dir, enable_verification=self._enable_verification_agent
-        )
-        self.agent_loader.load_all()
-
-        # --- Agent 团队系统初始化 ---
-        from valecode.teams.manager import TeamManager
-        from valecode.tools.team_create import TeamCreateTool
-        from valecode.tools.team_delete import TeamDeleteTool
-        from valecode.tools.lead_tasks import build_lead_task_tools
-
-        if getattr(self, "team_manager", None) is None:
-            self.team_manager = TeamManager(
-                worktree_manager=self.worktree_manager,
-                trace_manager=self.trace_manager,
-                task_store=self.session_manager.task_store,
-            )
-        else:
-            # Provider changes must not abandon existing worker leases.
-            self.team_manager._worktree_manager = self.worktree_manager
-
-        self.agent_tool = AgentTool(
-            agent_loader=self.agent_loader,
-            task_manager=self.task_manager,
-            trace_manager=self.trace_manager,
-            parent_agent=self.agent,
-            enable_fork=self._enable_fork,
-            provider_config=provider,
-            worktree_manager=self.worktree_manager,
-            team_manager=self.team_manager,
-        )
-        self.registry.register(self.agent_tool)
-        from valecode.runtime.cron import install_cron
+        from valecode.runtime.harness import HarnessOptions, assemble_harness
+        self.harness = assemble_harness(self.agent, self.session_manager, provider, self.registry,
+            options=HarnessOptions(enable_fork=self._enable_fork,
+                enable_verification=self._enable_verification_agent,
+                enable_coordinator=self._enable_coordinator_mode,
+                interactive=True, teammate_mode=self._teammate_mode),
+            task_manager=self.task_manager, trace_manager=self.trace_manager,
+            team_manager=getattr(self, "team_manager", None), worktree_manager=self.worktree_manager,
+            cron_ready=lambda: self._mcp_init_task is None or self._mcp_init_task.done(), cron_start=True)
+        self.agent_loader = self.harness.agent_loader
+        self.agent_tool = self.harness.agent_tool
+        self.team_manager = self.harness.team_manager
+        self.cron_runtime = self.harness.cron_runtime
         from valecode.commands.handlers.cron import create_cron_command
-        self.cron_runtime = install_cron(self.agent_tool, self.registry,
-            ready=lambda: self._mcp_init_task is None or self._mcp_init_task.done())
         self.command_registry.register_sync(create_cron_command(self.cron_runtime))
-
-        team_create_tool = TeamCreateTool(
-            team_manager=self.team_manager,
-            parent_agent=self.agent,
-            teammate_mode=self._teammate_mode,
-            is_interactive=True,
-            enable_coordinator_mode=self._enable_coordinator_mode,
-        )
-        self.registry.register(team_create_tool)
-
-        team_delete_tool = TeamDeleteTool(
-            team_manager=self.team_manager,
-            parent_agent=self.agent,
-        )
-        self.registry.register(team_delete_tool)
-        for task_tool in build_lead_task_tools(
-            self.team_manager, self.agent.agent_id, self.agent_tool
-        ):
-            self.registry.register(task_tool)
-
-        agent_catalog = self.agent_loader.list_agents()
-        if agent_catalog:
-            lines = [
-                "## Available Sub-Agent Types",
-                "",
-                "Use the Agent tool with subagent_type parameter to delegate tasks:",
-                "",
-            ]
-            for agent_type, when_to_use in agent_catalog:
-                lines.append(f"- **{agent_type}**: {when_to_use}")
-            if self._enable_fork:
-                lines.append("")
-                lines.append(
-                    "Leave subagent_type empty to fork the current conversation "
-                    "(inherits full dialog history)."
-                )
-            lines.append("")
-            lines.append(
-                "IMPORTANT: Sub-agents run in the background. "
-                "After calling the Agent tool, you will get a task ID immediately. "
-                "Do NOT wait, sleep, or poll for the result. "
-                "Simply report the task ID to the user and end your turn. "
-                "The system will automatically notify when the task completes."
-            )
-            self.agent.set_agent_catalog("\n".join(lines), catalog_list=agent_catalog)
 
         tasks_cmd = create_tasks_command(self.task_manager)
         self.command_registry.register_sync(tasks_cmd)
@@ -1564,10 +1497,6 @@ class ValeCodeApp(App):
                         block.set_result(event.output, event.is_error, event.elapsed)
                     self.call_after_refresh(chat.scroll_end, animate=False)
 
-                    ask_tool = self.registry.get("AskUserQuestion")
-                    if ask_tool and isinstance(ask_tool, AskUserTool) and ask_tool._pending_event:
-                        await self._handle_askuser(ask_tool._pending_event)
-
                 elif isinstance(event, TurnComplete):
                     if self.session:
                         for msg in self.conversation.history[history_cursor:]:
@@ -2088,10 +2017,11 @@ class ValeCodeApp(App):
         self._exit_requested = True
 
         async def _cleanup() -> None:
-            if self.team_manager is not None:
-                await self.team_manager.close()
-            if self.cron_runtime is not None:
-                await self.cron_runtime.close()
+            from valecode.runtime.harness import close_resources
+            await close_resources([
+                ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
+                ("teams", self.team_manager.close if self.team_manager is not None else None),
+            ])
             tasks: list[asyncio.Task] = []
 
             if (
@@ -2121,8 +2051,10 @@ class ValeCodeApp(App):
             tasks.append(asyncio.create_task(self._shutdown_mcp()))
             tasks.append(asyncio.create_task(self.task_manager.shutdown()))
             async def _release_registry_tools() -> None:
-                await self.registry.release_source(ToolSource.PLUGIN)
-                await self.registry.release_session()
+                await close_resources([
+                    ("plugins", lambda: self.registry.release_source(ToolSource.PLUGIN)),
+                    ("tools", self.registry.release_session),
+                ])
 
             tasks.append(asyncio.create_task(_release_registry_tools()))
 

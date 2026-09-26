@@ -1,27 +1,36 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from valecode.tools.base import Tool, ToolResult
 
 
 class QuestionItem(BaseModel):
-    type: str = Field(description="Question type: text, radio, select, checkbox")
-    name: str = Field(description="Question identifier")
-    message: str = Field(description="Question text to display")
+    type: Literal["text", "radio", "select", "checkbox"] = Field(description="Question input type")
+    name: str = Field(min_length=1, max_length=64, description="Question identifier")
+    message: str = Field(min_length=1, max_length=2000, description="Question text to display")
     options: list[str] = Field(
         default_factory=list,
+        max_length=30,
         description="Options for radio/select/checkbox types",
     )
 
 
 class AskUserParams(BaseModel):
     questions: list[QuestionItem] = Field(
-        description="List of questions to ask the user"
+        min_length=1, max_length=10, description="List of questions to ask the user"
     )
+
+    @model_validator(mode="after")
+    def distinct_names(self):
+        if len({q.name for q in self.questions}) != len(self.questions):
+            raise ValueError("Question names must be unique")
+        if any(len(option) > 1000 for q in self.questions for option in q.options):
+            raise ValueError("Question option exceeds 1000 characters")
+        return self
 
 
 class AskUserEvent:
@@ -50,8 +59,9 @@ class AskUserTool(Tool):
     should_defer = True
 
 
-    def __init__(self) -> None:
+    def __init__(self, on_request=None) -> None:
         self._pending_event: AskUserEvent | None = None
+        self._on_request = on_request
 
     async def execute(self, params: AskUserParams) -> ToolResult:
         questions_data = [q.model_dump() for q in params.questions]
@@ -62,6 +72,9 @@ class AskUserTool(Tool):
         self._pending_event = AskUserEvent(questions=questions_data, future=future)
 
         try:
+            if self._on_request is None:
+                return ToolResult(output="This host has no interactive question adapter", is_error=True)
+            await self._on_request(self._pending_event)
             answers = await asyncio.wait_for(future, timeout=300)
         except asyncio.TimeoutError:
             return ToolResult(

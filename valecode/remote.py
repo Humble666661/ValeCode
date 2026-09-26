@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import hashlib
+import secrets
 import ipaddress
 import json
 import logging
@@ -101,6 +103,8 @@ class RemoteServer:
         enable_fork: bool = False,
         enable_verification_agent: bool = False,
         background_task_config: Any = None,
+        worktree_config: Any = None,
+        enable_coordinator_mode: bool = False,
     ) -> None:
         if not _is_loopback_bind(addr) and not auth_token:
             raise ValueError(
@@ -116,6 +120,8 @@ class RemoteServer:
         self._enable_fork = enable_fork
         self._enable_verification_agent = enable_verification_agent
         self._background_task_config = background_task_config
+        self._worktree_config = worktree_config
+        self._enable_coordinator_mode = enable_coordinator_mode
 
         # WebSocket 连接池（支持多客户端广播）
         self._connections: set[ServerConnection] = set()
@@ -131,6 +137,11 @@ class RemoteServer:
 
         # 权限请求的 pending 队列：id -> Future
         self._pending_perms: dict[str, asyncio.Future[PermissionResponse]] = {}
+        self._pending_asks: dict[str, Any] = {}
+        self._pending_plan = None
+        self._pre_plan_mode = PermissionMode.DEFAULT
+        self._has_exited_plan_mode = False
+        self._request_tasks: set[asyncio.Task] = set()
 
         # 命令注册表
         self.command_registry = CommandRegistry()
@@ -151,6 +162,9 @@ class RemoteServer:
         self.cron_runtime = None
         self.task_manager: DurableTaskManager | None = None
         self.trace_manager = TraceManager()
+        self.harness = None
+        self.team_manager = None
+        self.worktree_manager = None
 
         # Memory / Session
         self.memory_manager: MemoryManager | None = None
@@ -196,14 +210,24 @@ class RemoteServer:
 
     async def _shutdown(self) -> None:
         """Release remote runtime resources even on startup failure/cancellation."""
-        if self.cron_runtime is not None:
-            await self.cron_runtime.close()
+        from valecode.runtime.harness import close_resources
+        self._settle_interactions()
+        self._pending_plan = None
+        if self.agent is not None:
+            self.agent.cancel("Remote server shutting down")
+        for task in list(self._request_tasks):
+            task.cancel()
+        await asyncio.gather(*self._request_tasks, return_exceptions=True)
+        self._request_tasks.clear()
+        await close_resources([
+            ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
+            ("teams", self.team_manager.close if self.team_manager is not None else None),
+        ])
         if self._notification_task is not None:
             self._notification_task.cancel()
             await asyncio.gather(self._notification_task, return_exceptions=True)
             self._notification_task = None
-        if self.task_manager is not None:
-            await self.task_manager.shutdown()
+        await close_resources([("tasks", self.task_manager.shutdown if self.task_manager is not None else None)])
         if self.mcp_manager is not None:
             try:
                 await self.mcp_manager.shutdown()
@@ -211,11 +235,10 @@ class RemoteServer:
                 log.exception("Failed to close MCP manager")
             self.mcp_manager = None
         if self.registry is not None:
-            try:
-                await self.registry.release_source(ToolSource.PLUGIN)
-                await self.registry.release_session()
-            except Exception:
-                log.exception("Failed to release remote tool session")
+            await close_resources([
+                ("plugins", lambda: self.registry.release_source(ToolSource.PLUGIN)),
+                ("tools", self.registry.release_session),
+            ])
         if self.hook_engine is not None:
             try:
                 await self.hook_engine.shutdown()
@@ -302,23 +325,39 @@ class RemoteServer:
             })
 
             # 消息循环
+            for identity, event in list(self._pending_asks.items()):
+                await websocket.send(json.dumps({"type": "ask_user", "data": {"id": identity, "questions": event.questions}}, ensure_ascii=False))
+            if self._pending_plan is not None:
+                await websocket.send(json.dumps({"type": "plan_approval", "data": {
+                    "id": self._pending_plan["id"], "content": self._pending_plan["content"]}}, ensure_ascii=False))
             async for raw in websocket:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
 
+                if not isinstance(msg, dict) or not isinstance(msg.get("data", {}), dict):
+                    continue
                 msg_type = msg.get("type", "")
                 data = msg.get("data", {})
 
                 if msg_type == "user_message":
-                    content = data.get("content", "").strip()
+                    content = data.get("content", "")
+                    if not isinstance(content, str):
+                        continue
+                    content = content.strip()
                     if content:
                         # 在后台任务中处理，不阻塞 WebSocket 读循环
-                        asyncio.create_task(self._handle_user_message(content))
+                        self._spawn_request(self._handle_user_message(content))
 
                 elif msg_type == "permission_response":
                     self._handle_permission_response(data)
+
+                elif msg_type == "ask_user_response":
+                    self._handle_ask_response(data)
+
+                elif msg_type == "plan_response":
+                    self._spawn_request(self._handle_plan_response(data))
 
                 elif msg_type == "cancel":
                     if self._cancel_event is not None:
@@ -409,63 +448,34 @@ class RemoteServer:
             model=provider.model,
         )
         self.agent.session_id = self.session_id
+        from valecode.tools.ask_user import AskUserTool
+        from valecode.tools.exit_plan_mode import ExitPlanModeTool
+        self.registry.register(AskUserTool(self._request_questions))
+        self.registry.register(ExitPlanModeTool(lambda: self.agent.plan_mode,
+            lambda: self.agent._get_plan_path().exists()))
         from valecode.tools.todo_write import TodoWrite
 
         todo_tool = TodoWrite(lambda: (self.agent.work_dir, self.session_id))
         self.registry.register(todo_tool)
         self.agent.set_todo_state_provider(todo_tool.current_summary)
 
-        # 子 Agent 与持久化后台任务。Remote 暂不开放 Team/Worktree 隔离，
-        # 普通定义型子 Agent 及可选的会话 fork 与 CLI/TUI 共用同一实现。
-        self.task_manager = DurableTaskManager.from_config(
-            self.session_manager.task_store,
-            self._background_task_config,
-        )
-        self.task_manager.start_maintenance()
-        self.agent_loader = AgentLoader(
-            work_dir,
-            enable_verification=self._enable_verification_agent,
-        )
-        self.agent_loader.load_all()
-        self.agent_tool = AgentTool(
-            agent_loader=self.agent_loader,
-            task_manager=self.task_manager,
-            trace_manager=self.trace_manager,
-            parent_agent=self.agent,
-            enable_fork=self._enable_fork,
-            provider_config=provider,
-        )
-        self.registry.register(self.agent_tool)
-        from valecode.runtime.cron import install_cron
+        from valecode.runtime.harness import HarnessOptions, assemble_harness
+        self.harness = assemble_harness(self.agent, self.session_manager, provider, self.registry,
+            options=HarnessOptions(enable_fork=self._enable_fork,
+                enable_verification=self._enable_verification_agent,
+                enable_coordinator=self._enable_coordinator_mode,
+                background_tasks=self._background_task_config, worktree_config=self._worktree_config),
+            trace_manager=self.trace_manager)
+        self.task_manager = self.harness.task_manager
+        self.agent_loader = self.harness.agent_loader
+        self.agent_tool = self.harness.agent_tool
+        self.team_manager = self.harness.team_manager
+        self.worktree_manager = self.harness.worktree_manager
+        self.cron_runtime = self.harness.cron_runtime
+        from valecode.commands.handlers.worktree import create_worktree_command
+        self.command_registry.register_sync(create_worktree_command(self.worktree_manager))
         from valecode.commands.handlers.cron import create_cron_command
-        self.cron_runtime = install_cron(self.agent_tool, self.registry, start=False)
         self.command_registry.register_sync(create_cron_command(self.cron_runtime))
-
-        agent_catalog = self.agent_loader.list_agents()
-        if agent_catalog:
-            lines = [
-                "## Available Sub-Agent Types",
-                "",
-                "Use the Agent tool with subagent_type to delegate a task:",
-                "",
-            ]
-            lines.extend(
-                f"- **{agent_type}**: {when_to_use}"
-                for agent_type, when_to_use in agent_catalog
-            )
-            if self._enable_fork:
-                lines.extend([
-                    "",
-                    "Leave subagent_type empty to fork the current conversation.",
-                ])
-            lines.extend([
-                "",
-                "Background task results are delivered automatically. "
-                "Do not wait, sleep, or poll after receiving a task ID.",
-            ])
-            self.agent.set_agent_catalog(
-                "\n".join(lines), catalog_list=agent_catalog
-            )
 
         self.command_registry.register_sync(create_tasks_command(self.task_manager))
         self.command_registry.register_sync(
@@ -524,6 +534,7 @@ class RemoteServer:
         """Deliver completed background work and let the lead Agent summarize it."""
         if (
             self._streaming
+            or self._pending_plan is not None
             or not self._connections
             or self.task_manager is None
             or self.agent is None
@@ -531,14 +542,16 @@ class RemoteServer:
             return
 
         completed = self.task_manager.poll_completed()
-        if not completed:
-            return
         completed = [
             task
             for task in completed
             if task.agent.session_id == self.session_id
         ]
-        if not completed:
+        for task in completed:
+            if self.team_manager is not None:
+                self.team_manager.on_teammate_completed(task.agent.agent_id)
+        team_notes = self.team_manager.drain_lead_mailbox() if self.team_manager is not None else []
+        if not completed and not team_notes:
             return
 
         for task in completed:
@@ -553,9 +566,9 @@ class RemoteServer:
                 },
             })
 
-        notification_prompt = "\n\n".join(
-            format_task_notification(task) for task in completed
-        )
+        notification_prompt = "\n\n".join([
+            *(format_task_notification(task) for task in completed), *team_notes,
+        ])
         await self._handle_user_message(
             notification_prompt,
             dispatch_commands=False,
@@ -616,6 +629,9 @@ class RemoteServer:
         """处理来自 Web UI 的用户消息或斜杠命令。"""
         if self._streaming:
             return
+        if self._pending_plan is not None:
+            await self._broadcast({"type": "system", "data": {"message": "请先批准、修改或拒绝当前计划。"}})
+            return
 
         # 斜杠命令
         if dispatch_commands and content.startswith("/"):
@@ -669,6 +685,10 @@ class RemoteServer:
                     })
 
                 elif isinstance(event, ToolResultEvent):
+                    if event.tool_name in {"EnterWorktree", "ExitWorktree"} and not event.is_error:
+                        self._sync_worktree_context()
+                    if event.tool_name == "ExitPlanMode" and not event.is_error and self.agent.plan_mode:
+                        await self._request_plan_approval()
                     # 如果之前有累积的流式文本，先结束它
                     if stream_buf:
                         await self._broadcast({
@@ -786,6 +806,7 @@ class RemoteServer:
             })
         finally:
             self._streaming = False
+            self._settle_interactions()
             self._cancel_event = None
 
     # ------------------------------------------------------------------
@@ -840,6 +861,9 @@ class RemoteServer:
                 await self._handle_compact()
                 return
 
+            elif name in {"plan", "p"}:
+                await cmd.handler(self._build_command_context(args))
+
             else:
                 await self._broadcast({
                     "type": "system",
@@ -883,6 +907,8 @@ class RemoteServer:
         )
 
     def _set_session(self, session: Session) -> None:
+        self._settle_interactions()
+        self._pending_plan = None
         self.session = session
         self.session_id = session.session_id
         if self.registry is not None:
@@ -961,7 +987,7 @@ class RemoteServer:
 
     def send_user_message(self, text: str) -> None:
         """同步接口 — 注入用户消息并触发 agent。"""
-        asyncio.create_task(
+        self._spawn_request(
             self._handle_user_message(text, dispatch_commands=False)
         )
 
@@ -969,9 +995,12 @@ class RemoteServer:
         if self.agent is None:
             return
         if enabled:
+            if not self.agent.plan_mode:
+                self._pre_plan_mode = self.agent.permission_mode
             self.agent.set_permission_mode(PermissionMode.PLAN)
         else:
-            self.agent.set_permission_mode(PermissionMode.DEFAULT)
+            self._pending_plan = None
+            self.agent.set_permission_mode(self._pre_plan_mode)
 
     def get_token_count(self) -> tuple[int, int]:
         if self.agent:
@@ -984,6 +1013,91 @@ class RemoteServer:
     # ------------------------------------------------------------------
     # 权限响应处理
     # ------------------------------------------------------------------
+
+    def _spawn_request(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._request_tasks.add(task)
+        def done(completed):
+            self._request_tasks.discard(completed)
+            if not completed.cancelled() and completed.exception() is not None:
+                log.error("Remote request failed", exc_info=completed.exception())
+        task.add_done_callback(done)
+
+    def _settle_interactions(self):
+        for future in self._pending_perms.values():
+            if not future.done():
+                future.set_result(PermissionResponse.DENY)
+        self._pending_perms.clear()
+        for event in self._pending_asks.values():
+            if not event.future.done():
+                event.future.set_result({})
+        self._pending_asks.clear()
+
+    async def _request_questions(self, event):
+        request_id = "ask_" + secrets.token_hex(12)
+        self._pending_asks[request_id] = event
+        event.future.add_done_callback(lambda _future: self._pending_asks.pop(request_id, None))
+        await self._broadcast({"type": "ask_user", "data": {"id": request_id, "questions": event.questions}})
+
+    def _handle_ask_response(self, data):
+        identity = data.get("id")
+        if not isinstance(identity, str):
+            return
+        event = self._pending_asks.get(identity)
+        answers = data.get("answers")
+        if event is None or event.future.done() or not isinstance(answers, dict):
+            return
+        names = {q["name"] for q in event.questions}
+        if any(key not in names or not isinstance(value, str) or len(value) > 20000 for key, value in answers.items()):
+            return
+        self._pending_asks.pop(identity, None)
+        event.future.set_result(answers)
+
+    def _read_plan(self):
+        path = self.agent._get_plan_path()
+        if path.is_symlink() or not path.resolve().is_relative_to((Path(self.agent.work_dir) / ".valecode" / "plans").resolve()) or path.stat().st_size > 200000:
+            raise ValueError("Plan is outside the managed directory or exceeds 200 KB")
+        return path.read_text(encoding="utf-8")
+
+    async def _request_plan_approval(self):
+        content = self._read_plan()
+        identity = "plan_" + secrets.token_hex(12)
+        self._pending_plan = {"id": identity, "session_id": self.session_id, "content": content,
+            "digest": hashlib.sha256(content.encode()).hexdigest()}
+        await self._broadcast({"type": "plan_approval", "data": {"id": identity, "content": content}})
+
+    async def _handle_plan_response(self, data):
+        pending = self._pending_plan
+        if self._streaming or pending is None or data.get("id") != pending["id"] or pending["session_id"] != self.session_id:
+            return
+        choice = data.get("choice")
+        if choice not in {"approve", "feedback", "reject"}:
+            return
+        feedback = data.get("feedback", "")
+        if not isinstance(feedback, str) or len(feedback) > 20000:
+            return
+        self._pending_plan = None  # Consume once before scheduling another run.
+        if choice == "approve":
+            try:
+                content = self._read_plan()
+                if hashlib.sha256(content.encode()).hexdigest() != pending["digest"]:
+                    raise ValueError("计划已修改，请重新提交审批")
+            except (OSError, ValueError) as exc:
+                await self._broadcast({"type": "error", "data": {"message": str(exc)}})
+                return
+            self.agent.set_permission_mode(self._pre_plan_mode)
+            self._has_exited_plan_mode = True
+            from valecode.prompts import build_plan_mode_exit_reminder
+            reminder = build_plan_mode_exit_reminder(str(self.agent._get_plan_path()), True)
+            await self._handle_user_message(reminder + "\n\nUser approved the plan. Execute it under the existing permissions.\n\n" + content, dispatch_commands=False)
+        elif choice == "feedback" and feedback.strip():
+            await self._handle_user_message(feedback, dispatch_commands=False)
+        else:
+            await self._broadcast({"type": "system", "data": {"message": "计划未执行，仍保持 Plan 模式。"}})
+
+    def _sync_worktree_context(self):
+        from valecode.runtime.harness import sync_worktree_context
+        sync_worktree_context(self.agent, self.worktree_manager)
 
     def _handle_permission_response(self, data: dict[str, Any]) -> None:
         """处理来自 Web UI 的权限回复。"""

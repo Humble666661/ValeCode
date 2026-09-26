@@ -211,6 +211,29 @@ mcp_servers:
 可通过 `/mcp` 查看实际名称。资源与 Prompt 沿用 MCP 工具的权限、Hooks 和结果预算，
 获取到的 Prompt 消息作为工具结果返回。
 
+## 记忆召回
+
+记忆保存在用户或项目的 Markdown 文件中；大目录使用可重建的 SQLite FTS5 缓存缩小
+候选清单，最后由独立模型查询选择最多 5 条。TUI 按 Session 记录实际展示过的记忆，
+恢复会话后继续去重。召回总预算为 8 秒，失败不会阻止主对话。
+
+可选的语义向量检索默认关闭。启用后，**用户查询和记忆正文会发送到单独选择的
+embedding 服务**，不会默认使用聊天 Provider。支持 OpenAI-compatible `/embeddings`：
+
+```dotenv
+VALECODE_MEMORY_ENABLED=true
+VALECODE_MEMORY_BASE_URL=http://127.0.0.1:11434/v1
+VALECODE_MEMORY_MODEL=your-installed-embedding-model
+# VALECODE_MEMORY_API_KEY=your-key
+VALECODE_MEMORY_TIMEOUT_SECONDS=2
+```
+
+也可在 YAML 的 `memory_search` 段使用 `enabled/base_url/model/api_key/timeout_seconds`，
+密钥支持 `${ENV_VAR}`。非本机服务默认要求 HTTPS。超过 80 条未展示记忆时，将语义
+余弦排序与 FTS5 排序融合，再补少量近期文件；远端失败、超时或缓存损坏退回词法检索。
+向量缓存位于 `.valecode/cache/`，按内容摘要及服务/模型身份增量更新，不替代 Markdown。
+冷缓存分批建立，语义阶段最多 4 秒；已完成批次保留供后续复用。
+
 ## Skills
 
 项目 Skill 放在 `.valecode/skills/`，用户级 Skill 放在 `~/.valecode/skills/`；支持
@@ -336,7 +359,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **883 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **910 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

@@ -345,6 +345,12 @@ def validate_config_structure(raw: object) -> dict:
     if not isinstance(raw, dict) or "providers" not in raw:
         raise ConfigError("Config must contain a 'providers' list")
 
+    from valecode.memory.embedding import validate_memory_search
+    try:
+        memory_search = validate_memory_search(raw.get("memory_search"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
     return {
         "providers": validate_providers(raw["providers"]),
         "permission_mode": validate_permission_mode(raw.get("permission_mode", "default")),
@@ -362,4 +368,5 @@ def validate_config_structure(raw: object) -> dict:
         "sandbox": validate_sandbox(raw.get("sandbox")),
         "remote": validate_remote(raw.get("remote")),
         "background_tasks": validate_background_tasks(raw.get("background_tasks")),
+        "memory_search": memory_search,
     }

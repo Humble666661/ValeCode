@@ -601,6 +601,7 @@ class ValeCodeApp(App):
         driver_class: type | None = None,
         sandbox_config: Any = None,
         background_task_config: Any = None,
+        memory_search_config: Any = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
         self.providers = providers
@@ -615,6 +616,8 @@ class ValeCodeApp(App):
         from valecode.config import SandboxAppConfig
         self._sandbox_cfg: SandboxAppConfig = sandbox_config or SandboxAppConfig()
         self._background_task_config = background_task_config
+        self._memory_search_config = memory_search_config
+        self.memory_recall_metrics: dict[str, Any] = {}
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
@@ -1351,8 +1354,17 @@ class ValeCodeApp(App):
                     pass
             return collected
 
+        started = _time.monotonic()
+        status = "fallback"
+        count = 0
         try:
             index = MemorySearchIndex(self.agent.work_dir) if self.agent else None
+            from valecode.memory.embedding import MemoryVectorIndex
+            vector_index = (
+                MemoryVectorIndex(self.agent.work_dir, self._memory_search_config)
+                if self.agent and self._memory_search_config and self._memory_search_config.enabled
+                else None
+            )
             results = await asyncio.wait_for(
                 find_relevant_memories(
                     query=query,
@@ -1362,12 +1374,21 @@ class ValeCodeApp(App):
                     already_surfaced=surfaced,
                     selector=selector,
                     index=index,
+                    vector_index=vector_index,
                 ),
                 timeout=8.0,
             )
-            return render_reminder_with_paths(results)
+            reminder = await asyncio.to_thread(render_reminder_with_paths, results)
+            status, count = "success", len(reminder.paths)
+            return reminder
         except (asyncio.TimeoutError, Exception):
             return MemoryRecallResult("", [])
+        finally:
+            self.memory_recall_metrics = {
+                "duration_ms": round((_time.monotonic() - started) * 1000, 2),
+                "selected_count": count,
+                "status": status,
+            }
 
     def _refresh_skills_if_needed(self) -> None:
         """每轮对话前检查 skill 目录 modtime，有变化则自动 reload。"""

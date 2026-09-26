@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from valecode.memory.search_index import MemorySearchIndex
+from valecode.memory.embedding import MemoryVectorIndex, fuse_rankings
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ def scan_memory_files(memory_dir: Path, scope: str) -> list[MemoryHeader]:
     md_files: list[Path] = []
     try:
         for fp in memory_dir.rglob("*.md"):
-            if fp.is_file() and fp.name != ENTRYPOINT_NAME:
+            if fp.is_file() and fp.name != ENTRYPOINT_NAME and fp.resolve().is_relative_to(memory_dir.resolve()):
                 md_files.append(fp)
     except OSError:
         return []
@@ -296,6 +297,7 @@ async def find_relevant_memories(
     already_surfaced: set[str] | None,
     selector: SelectorFn,
     index: MemorySearchIndex | None = None,
+    vector_index: MemoryVectorIndex | None = None,
 ) -> list[RelevantMemory]:
     """Scan both dirs, filter already-surfaced, ask selector to pick up to 5
     relevant filenames, and return the corresponding paths + mtimes.
@@ -305,9 +307,9 @@ async def find_relevant_memories(
     """
     all_headers: list[MemoryHeader] = []
     if user_mem_dir is not None:
-        all_headers.extend(scan_memory_files(user_mem_dir, "user"))
+        all_headers.extend(await asyncio.to_thread(scan_memory_files, user_mem_dir, "user"))
     if project_mem_dir is not None:
-        all_headers.extend(scan_memory_files(project_mem_dir, "project"))
+        all_headers.extend(await asyncio.to_thread(scan_memory_files, project_mem_dir, "project"))
 
     surfaced = already_surfaced or set()
     candidates = [m for m in all_headers if m.file_path not in surfaced]
@@ -316,13 +318,21 @@ async def find_relevant_memories(
 
     # Keep small manifests complete. For large stores, shortlist lexical hits
     # and a few recent files so the LLM selector stays within a modest budget.
-    if index is not None and len(candidates) > 80:
+    if (index is not None or vector_index is not None) and len(candidates) > 80:
+        ranked = []
         try:
             # Ask for all indexed matches before filtering surfaced paths;
             # otherwise the top hits may all be memories this session saw.
-            ranked = await asyncio.to_thread(index.rank, query, all_headers, len(all_headers))
+            if index is not None:
+                ranked = await asyncio.to_thread(index.rank, query, all_headers, len(all_headers))
         except (OSError, ValueError, sqlite3.DatabaseError):
             ranked = []  # The Markdown files are authoritative.
+        if vector_index is not None:
+            try:
+                semantic = await vector_index.rank(query, all_headers, len(all_headers))
+                ranked = fuse_rankings(ranked, semantic)
+            except Exception:
+                pass  # Best-effort provider/cache failure: retain lexical recall.
         if ranked:
             by_path = {header.file_path: header for header in candidates}
             shortlist = [by_path[path] for path in ranked if path in by_path][:40]
@@ -352,6 +362,8 @@ async def find_relevant_memories(
         if m is not None and m.file_path not in seen_paths:
             seen_paths.add(m.file_path)
             result.append(RelevantMemory(path=m.file_path, mtime_ms=m.mtime_ms))
+            if len(result) == 5:
+                break
     return result
 
 

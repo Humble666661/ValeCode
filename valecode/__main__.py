@@ -148,6 +148,7 @@ def main() -> None:
         driver_class=NoAltScreenDriver,
         sandbox_config=config.sandbox,
         background_task_config=config.background_tasks,
+        memory_search_config=config.memory_search,
     )
     app.run()
 

@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 import yaml
 from dotenv import dotenv_values
+from valecode.memory.embedding import MemorySearchConfig
 
 from .validator import (
     ConfigError,
@@ -230,6 +231,7 @@ class AppConfig:
     background_tasks: BackgroundTaskConfig = field(
         default_factory=BackgroundTaskConfig
     )
+    memory_search: MemorySearchConfig = field(default_factory=MemorySearchConfig)
     _specified_fields: frozenset[str] = field(
         default_factory=frozenset, repr=False, compare=False
     )
@@ -315,6 +317,7 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
         sandbox=sandbox_cfg,
         remote=remote_cfg,
         background_tasks=background_task_cfg,
+        memory_search=MemorySearchConfig(**validated["memory_search"]),
     )
 
 
@@ -337,6 +340,8 @@ def _load_single_file(path: Path, env: Mapping[str, str] | None = None) -> AppCo
     if isinstance(raw_remote, dict):
         config.remote._specified_fields = frozenset(raw_remote)
     raw_background_tasks = raw.get("background_tasks")
+    if isinstance(raw.get("memory_search"), dict):
+        config.memory_search._specified_fields = frozenset(raw["memory_search"])
     if isinstance(raw_background_tasks, dict):
         config.background_tasks._specified_fields = frozenset(
             name
@@ -395,6 +400,8 @@ def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
             field_name,
             getattr(override.background_tasks, field_name),
         )
+    for name in override.memory_search._specified_fields:
+        setattr(base.memory_search, name, getattr(override.memory_search, name))
     return base
 
 
@@ -520,6 +527,26 @@ def _apply_env_overrides(config: AppConfig, env: Mapping[str, str]) -> AppConfig
         )
     if "VALECODE_REMOTE_TOKEN" in env:
         config.remote.token = env["VALECODE_REMOTE_TOKEN"].strip()
+    from valecode.memory.embedding import validate_memory_search
+    search = asdict(config.memory_search)
+    search.pop("_specified_fields")
+    for key in search:
+        env_key = "VALECODE_MEMORY_" + key.upper()
+        if env_key not in env:
+            continue
+        value = env[env_key]
+        if key in {"enabled", "allow_insecure_http"}:
+            value = _parse_env_bool(value, env_key)
+        elif key == "timeout_seconds":
+            try:
+                value = float(value)
+            except ValueError as exc:
+                raise ConfigError(f"{env_key} must be a number") from exc
+        search[key] = value
+    try:
+        config.memory_search = MemorySearchConfig(**validate_memory_search(search))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return config
 
 

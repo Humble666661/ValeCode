@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import sys
 import time
@@ -55,7 +56,7 @@ from valecode.observability import Tracing, get_tracing
 from valecode.hooks import HookContext, HookEngine, ToolRejectedError
 from valecode.hooks.engine import HookNotification
 from valecode.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
-from valecode.tools import ToolRegistry
+from valecode.tools import ToolRegistry, ToolSource
 from valecode.tools.base import (
     MAX_OUTPUT_CHARS,
     StreamEnd,
@@ -239,6 +240,7 @@ class LLMResponse:
 class StreamCollector:
     def __init__(self) -> None:
         self.response = LLMResponse()
+        self.early_results: dict[str, _ToolExecResult] = {}
 
     async def consume(
         self, stream: AsyncIterator[StreamEvent]
@@ -309,39 +311,37 @@ class _ToolExecResult:
     result: ToolResult
     elapsed: float
     is_unknown: bool
+    registration_sequence: int | None = None
 
 
 class StreamingExecutor:
     def __init__(self) -> None:
-        self._tasks: list[tuple[int, asyncio.Task[_ToolExecResult]]] = []
-        self._order = 0
+        self._tasks: dict[str, asyncio.Task[_ToolExecResult | None]] = {}
 
     def submit(
         self,
+        tool_id: str,
         coro: Any,
     ) -> None:
+        if tool_id in self._tasks:
+            coro.close()
+            return
         task = asyncio.create_task(coro)
-        self._tasks.append((self._order, task))
-        self._order += 1
+        self._tasks[tool_id] = task
 
     async def collect_results(self) -> list[_ToolExecResult]:
         if not self._tasks:
             return []
-        tasks = [t for _, t in sorted(self._tasks, key=lambda x: x[0])]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out: list[_ToolExecResult] = []
-        for r in results:
-            if isinstance(r, Exception):
-                out.append(_ToolExecResult(
-                    tool_id="",
-                    tool_name="",
-                    result=ToolResult(output=f"Tool execution error: {r}", is_error=True),
-                    elapsed=0.0,
-                    is_unknown=False,
-                ))
-            else:
-                out.append(r)
-        return out
+        results = await asyncio.gather(*self._tasks.values())
+        return [result for result in results if result is not None]
+
+    async def shutdown(self) -> None:
+        for task in self._tasks.values():
+            if not task.done():
+                task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        self._tasks.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -1120,6 +1120,10 @@ class Agent:
         total_wait = 0.0
         while True:
             attempt_started = time.monotonic()
+            executor = StreamingExecutor()
+            shadow_guard = copy.copy(self.loop_guard)
+            read_prefix = True
+            collector.early_results.clear()
             first_event_at: float | None = None
             trace_context = self.tracing.span(
                 "llm.stream",
@@ -1141,11 +1145,21 @@ class Agent:
                 async for event in collector.consume(llm_stream):
                     if first_event_at is None:
                         first_event_at = time.monotonic()
+                    if isinstance(event, ToolUseEvent) and read_prefix:
+                        call = collector.response.tool_calls[-1]
+                        if shadow_guard.observe(call).blocked or not self._can_stream_read(call):
+                            read_prefix = False
+                        else:
+                            registration = self.registry.get_registration(call.tool_name)
+                            assert registration is not None
+                            executor.submit(call.tool_id, self._execute_stream_read(call, registration.sequence))
                     yield event
             except asyncio.CancelledError:
+                await executor.shutdown()
                 trace_context.__exit__(*sys.exc_info())
                 raise
             except BaseException as exc:
+                await executor.shutdown()
                 decision = self.retry_policy.decide(
                     exc, retries_used=retries_used, total_wait=total_wait
                 )
@@ -1195,6 +1209,16 @@ class Agent:
                 continue
             else:
                 response = collector.response
+                try:
+                    if response.stop_reason != "max_tokens":
+                        collector.early_results = {
+                            result.tool_id: result for result in await executor.collect_results()
+                        }
+                except BaseException:
+                    trace_context.__exit__(*sys.exc_info())
+                    raise
+                finally:
+                    await executor.shutdown()
                 finished = time.monotonic()
                 span.set_attributes(
                     {
@@ -1646,7 +1670,10 @@ class Agent:
                     calls_to_execute: list[ToolCallComplete] = []
                     for tc in batch.calls:
                         existing = self._control_existing_tool_result(tc.tool_id)
+                        if existing is None:
+                            existing = self._stream_read_result(collector, tc)
                         if existing is not None:
+                            self._transition_control_tool(tc.tool_id, ToolCallStatus.RUNNING)
                             result, elapsed, is_unknown = existing
                             result_by_id[tc.tool_id] = _ToolExecResult(
                                 tool_id=tc.tool_id,
@@ -1700,8 +1727,11 @@ class Agent:
                         elapsed = 0.0
                         is_unknown = False
                         reused = self._control_existing_tool_result(tc.tool_id)
+                        if reused is None:
+                            reused = self._stream_read_result(collector, tc)
                         if reused is not None:
                             result, elapsed, is_unknown = reused
+                            self._transition_control_tool(tc.tool_id, ToolCallStatus.RUNNING)
                         else:
                             self._transition_control_tool(
                                 tc.tool_id, ToolCallStatus.RUNNING
@@ -1880,6 +1910,83 @@ class Agent:
     def _build_permission_description(self, tc: ToolCallComplete) -> str:
         """为 HITL 权限确认生成人类可读的操作描述。"""
         return PermissionChecker.describe_tool_action(tc.tool_name, tc.arguments)
+
+    def _can_stream_read(self, call: ToolCallComplete, *, check_existing: bool = True) -> bool:
+        registration = self.registry.get_registration(call.tool_name)
+        if self.hook_engine is not None or registration is None:
+            return False
+        if check_existing and self.run_store is not None and self._current_run_id is not None:
+            existing = self._control_call(lambda: self.run_store.get_tool_call(
+                f"{self._current_run_id}:{call.tool_id}"
+            ))
+            if existing is not None:
+                return False
+        tool = registration.tool
+        eligible = (
+            registration.source == ToolSource.BUILTIN
+            and tool.is_read_only and tool.is_concurrency_safe
+            and self.registry.is_enabled(call.tool_name)
+        )
+        if not eligible or self.permission_checker is None:
+            return eligible
+        with self.tracing.span("permission.evaluate", {
+            **self._trace_attributes(), "tool.name": call.tool_name,
+            "tool.call_id": call.tool_id, "permission.preflight": True,
+            "tool.read_ahead": True,
+        }) as span:
+            decision = self.permission_checker.check(tool, call.arguments)
+            span.set_attributes({"permission.effect": decision.effect})
+            return decision.effect == "allow"
+
+    async def _execute_stream_read(
+        self, call: ToolCallComplete, sequence: int,
+    ) -> _ToolExecResult | None:
+        start = time.monotonic()
+
+        async def execute() -> ToolResult | None:
+            registration = self.registry.get_registration(call.tool_name)
+            if registration is None or registration.sequence != sequence or not self._can_stream_read(call):
+                return None
+            params = registration.tool.params_model.model_validate(call.arguments)
+            return await self.registry.execute(call.tool_name, params)
+
+        with self.tracing.span("tool.execute", {
+            **self._trace_attributes(), "tool.name": call.tool_name, "tool.call_id": call.tool_id,
+            "tool.read_ahead": True,
+            "tool.arguments": call.arguments,
+        }) as span:
+            try:
+                result = await self.execution_controller.execute_tool(
+                    execute, token=self.cancellation_token, tool_name=call.tool_name,
+                )
+            except Exception as exc:
+                result = ToolResult(output=f"Tool execution error: {exc}", is_error=True)
+            if result is None:
+                return None
+            span.set_attributes({
+                "tool.duration_ms": round((time.monotonic() - start) * 1000, 3),
+                "tool.is_error": result.is_error,
+                "tool.output": result.output,
+            })
+            if result.is_error:
+                span.set_error(result.output)
+            self._snapshot_for_recovery(call, result)
+            return _ToolExecResult(
+                tool_id=call.tool_id, tool_name=call.tool_name, result=result,
+                elapsed=time.monotonic() - start, is_unknown=False,
+                registration_sequence=sequence,
+            )
+
+    def _stream_read_result(
+        self, collector: StreamCollector, call: ToolCallComplete,
+    ) -> tuple[ToolResult, float, bool] | None:
+        result = collector.early_results.get(call.tool_id)
+        registration = self.registry.get_registration(call.tool_name)
+        if (result is None or registration is None or
+                registration.sequence != result.registration_sequence or
+                not self._can_stream_read(call, check_existing=False)):
+            return None
+        return result.result, result.elapsed, result.is_unknown
 
     async def _execute_single_tool_direct(
         self, tc: ToolCallComplete
@@ -2505,8 +2612,11 @@ class Agent:
                         "args": tc.arguments,
                     })
                 existing = self._control_existing_tool_result(tc.tool_id)
+                if existing is None:
+                    existing = self._stream_read_result(collector, tc)
                 if existing is not None:
                     result, elapsed, _ = existing
+                    self._transition_control_tool(tc.tool_id, ToolCallStatus.RUNNING)
                 else:
                     self._transition_control_tool(tc.tool_id, ToolCallStatus.RUNNING)
                     started = time.monotonic()

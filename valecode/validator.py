@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 VALID_PROTOCOLS = {"anthropic", "openai", "openai-compat"}
 
 VALID_PERMISSION_MODES = {
@@ -138,6 +140,21 @@ def validate_mcp_servers(raw_mcp: list | None) -> list[dict]:
             raise ConfigError(
                 f"MCP server '{name}': must have either 'command' or 'url'"
             )
+        limits = {}
+        for key, default in (
+            ("connect_timeout", 15.0), ("request_timeout", 60.0), ("retry_delay", 0.5)
+        ):
+            value = entry.get(key, default)
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0
+            ):
+                raise ConfigError(f"MCP server '{name}': '{key}' must be a finite positive number")
+            limits[key] = float(value)
+        retries = entry.get("max_retries", 2)
+        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 10:
+            raise ConfigError(f"MCP server '{name}': 'max_retries' must be an integer from 0 to 10")
+        limits["max_retries"] = retries
         servers.append(
             {
                 "name": name,
@@ -146,6 +163,7 @@ def validate_mcp_servers(raw_mcp: list | None) -> list[dict]:
                 "url": entry.get("url"),
                 "headers": entry.get("headers", {}),
                 "env": entry.get("env", {}),
+                **limits,
             }
         )
 

@@ -176,6 +176,41 @@ Remote host/port 等配置适合放在 YAML 中。Remote Token 等秘密应放�
 
 项目和用户还可以通过 `.valecode/commands/` 添加 Markdown 自定义命令。
 
+## MCP 工具、资源与 Prompt
+
+在 `.valecode/config.yaml` 配置 stdio 或 Streamable HTTP 服务器，例如：
+
+```yaml
+mcp_servers:
+  - name: local
+    command: python
+    args: ["path/to/mcp_server.py"]
+    connect_timeout: 15
+    request_timeout: 60
+    max_retries: 2
+    retry_delay: 0.5
+  - name: remote
+    url: "https://your-server.example/mcp"
+    headers:
+      Authorization: "Bearer ${MCP_TOKEN}"
+```
+
+时间单位为秒，上述数值也是默认值；`max_retries` 是首次连接失败后的额外尝试次数，
+设为 `0` 可关闭连接重试。连接/初始化失败会释放本次 transport，单台服务器失败
+不会阻止其他服务器。请求超时包含已连接服务器上的排队时间；工具调用失败或超时
+会返回错误，运行时不会自动重放可能产生副作用的调用。
+
+远端工具以 `mcp_<server>_<tool>` 注册，初始通过 `ToolSearch` 延迟发现。服务器声明
+对应能力时，还会注册 `mcp_<server>_resources` 和 `mcp_<server>_prompts`：
+
+- Resources 支持 `action: list`、`templates` 和 `read`；读取时传入 `uri`。
+- Prompts 支持 `action: list` 和 `get`；获取时传入 `name` 与字符串字典 `arguments`。
+
+只有资源/Prompt、没有远端工具的服务器也可使用。目录列表支持分页，重复游标会明确
+报错；二进制资源只显示 URI/MIME 摘要。目录工具名与远端工具重名时会添加数字后缀，
+可通过 `/mcp` 查看实际名称。资源与 Prompt 沿用 MCP 工具的权限、Hooks 和结果预算，
+获取到的 Prompt 消息作为工具结果返回。
+
 ## Skills
 
 项目 Skill 放在 `.valecode/skills/`，用户级 Skill 放在 `~/.valecode/skills/`；支持
@@ -301,7 +336,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **844 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **870 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

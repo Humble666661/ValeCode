@@ -155,6 +155,10 @@ class MCPServerConfig:
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
+    connect_timeout: float = 15.0
+    request_timeout: float = 60.0
+    max_retries: int = 2
+    retry_delay: float = 0.5
 
 
     @property
@@ -258,6 +262,10 @@ def _build_app_config(validated: dict, env: Mapping[str, str]) -> AppConfig:
             url=s["url"],
             headers=s["headers"],
             env=s["env"],
+            connect_timeout=s["connect_timeout"],
+            request_timeout=s["request_timeout"],
+            max_retries=s["max_retries"],
+            retry_delay=s["retry_delay"],
         )
         for s in validated["mcp_servers"]
     ]

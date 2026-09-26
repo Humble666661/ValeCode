@@ -64,6 +64,7 @@ class MCPToolWrapper(Tool):
         self._server_name = server_name
         self._tool_def = tool_def
         self._client = client
+        self._closed = False
         self.name = f"mcp_{server_name}_{tool_def.name}"
         self.description = tool_def.description or tool_def.name
         self.category = "command"
@@ -91,6 +92,8 @@ class MCPToolWrapper(Tool):
 
 
     async def execute(self, params: BaseModel) -> ToolResult:
+        if self._closed:
+            return ToolResult(output=f"MCP tool '{self.name}' has been released.", is_error=True)
         if not self._client.is_alive:
             try:
                 await self._client.connect()
@@ -105,7 +108,6 @@ class MCPToolWrapper(Tool):
                 self._tool_def.name, params.model_dump(exclude_none=True)
             )
         except Exception as e:
-            self._client._alive = False
             return ToolResult(
                 output=f"MCP tool call failed: {e}",
                 is_error=True,
@@ -113,3 +115,7 @@ class MCPToolWrapper(Tool):
 
         text = _extract_text(result.content)
         return ToolResult(output=text, is_error=bool(result.isError))
+
+    async def close(self) -> None:
+        # The manager owns the shared connection; sibling wrappers still need it.
+        self._closed = True

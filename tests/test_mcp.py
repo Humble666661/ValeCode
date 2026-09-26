@@ -109,6 +109,10 @@ class TestLoadConfigMCP:
                 args: ["-y", "@modelcontextprotocol/server-github"]
                 env:
                   GITHUB_TOKEN: "${GITHUB_TOKEN}"
+                connect_timeout: 5
+                request_timeout: 30
+                max_retries: 0
+                retry_delay: 0.25
         """)
         config = load_config(path)
         assert len(config.mcp_servers) == 1
@@ -117,6 +121,7 @@ class TestLoadConfigMCP:
         assert srv.command == "npx"
         assert srv.is_stdio is True
         assert srv.args == ["-y", "@modelcontextprotocol/server-github"]
+        assert (srv.connect_timeout, srv.request_timeout, srv.max_retries, srv.retry_delay) == (5, 30, 0, 0.25)
 
     def test_http_server(self, tmp_path: Path) -> None:
         path = self._write_config(tmp_path, """\
@@ -272,6 +277,7 @@ class TestMCPManagerPartialFailure:
         with patch("valecode.mcp.manager.MCPClient") as MockClient:
             good_instance = AsyncMock()
             good_instance.is_alive = True
+            good_instance.supports = lambda _: False
 
             from mcp import types as mcp_types
             good_instance.list_tools.return_value = [

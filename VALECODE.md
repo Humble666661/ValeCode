@@ -78,7 +78,7 @@ uv run valecode -p "检查当前改动"
 uv run pytest -q
 ```
 
-当前完整基线为 `844 passed, 1 skipped`。新增行为必须包含正常路径和至少一个失败、
+当前完整基线为 `870 passed, 1 skipped`。新增行为必须包含正常路径和至少一个失败、
 取消、重启或边界场景测试。
 
 ## Python 代码规范
@@ -119,6 +119,9 @@ uv run pytest -q
 - 子 Agent 继承父级 ExecutionController，避免绕过全局工具并发额度。
 - 后台 Task 的 claim、lease、heartbeat、retry 和完成提交必须可由另一进程安全接管。
 - 创建异步任务时明确其所有者，并在正常退出、失败和取消路径回收资源。
+- MCP transport 与 `ClientSession` 的进入、请求和退出由同一个 owner task 执行；
+  manager 持有共享连接，工具包装的 `close()` 只停止该包装的使用。重连保留 client
+  对象身份；请求失败后不得自动重放可能产生外部副作用的调用。
 
 ## 文档与配置
 

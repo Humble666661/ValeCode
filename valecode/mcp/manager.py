@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
 from valecode.config import MCPServerConfig
 from valecode.mcp.client import MCPClient
+from valecode.mcp.catalog_tools import build_catalog_tools
 from valecode.mcp.tool_wrapper import MCPToolWrapper
 from valecode.tools import ToolRegistry, ToolSource
 from valecode.tools.base import Tool
@@ -34,6 +36,8 @@ class MCPManager:
         self._configs: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, MCPClient] = {}
         self._registry: ToolRegistry | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._closed = False
 
 
     def load_configs(self, configs: list[MCPServerConfig]) -> None:
@@ -47,27 +51,38 @@ class MCPManager:
         对齐 Go 版 ConnectAll：连接后从 InitializeResult 提取 instructions，
         将其包含在 ServerInfo 中返回，供系统提示注入使用。
         """
+        async with self._lifecycle_lock:
+            return await self._connect_all()
+
+    async def _connect_all(self) -> ConnectResult:
+        if self._closed:
+            raise RuntimeError("MCP manager is shut down")
         result = ConnectResult()
         for name, config in self._configs.items():
-            try:
+            client = self._clients.get(name)
+            if client is None:
                 client = MCPClient(config)
+            try:
                 await client.connect()
-                self._clients[name] = client
-
-                # 从 InitializeResult 提取 instructions
-                info = ServerInfo(name=name, instructions=client.instructions)
-                result.servers.append(info)
-
                 tools = await client.list_tools()
+                wrappers = [MCPToolWrapper(name, tool_def, client) for tool_def in tools]
+                wrappers.extend(build_catalog_tools(name, client, {tool.name for tool in wrappers}))
+                self._clients[name] = client
+                result.servers.append(ServerInfo(name=name, instructions=client.instructions))
+                result.tools.extend(wrappers)
                 for tool_def in tools:
-                    wrapper = MCPToolWrapper(name, tool_def, client)
-                    result.tools.append(wrapper)
-                    logger.info("Registered MCP tool: %s", wrapper.name)
+                    logger.info("Discovered MCP tool: %s/%s", name, tool_def.name)
 
             except Exception as e:
+                await client.close()
+                self._clients.pop(name, None)
                 msg = f"MCP server '{name}': {e}"
                 logger.warning(msg)
                 result.errors.append(msg)
+            except BaseException:
+                await client.close()
+                self._clients.pop(name, None)
+                raise
 
         return result
 
@@ -78,37 +93,33 @@ class MCPManager:
         调用方可通过 result.errors 获取错误列表，也可通过 result.servers
         获取每个服务器的 instructions。
         """
-        result = await self.connect_all()
-        for tool in result.tools:
-            assert isinstance(tool, MCPToolWrapper)
-            registry.register(
-                tool,
-                source=ToolSource.MCP,
-                scope_id=f"mcp:{tool.server_name}",
-            )
-        self._registry = registry
-        return result
+        async with self._lifecycle_lock:
+            result = await self._connect_all()
+            if self._registry is not None:
+                for name in self._configs:
+                    await self._registry.release_scope(f"mcp:{name}")
+            self._registry = registry
+            for tool in result.tools:
+                assert isinstance(tool, MCPToolWrapper)
+                registry.register(
+                    tool, source=ToolSource.MCP, scope_id=f"mcp:{tool.server_name}",
+                )
+            return result
 
 
     async def get_client(self, name: str) -> MCPClient | None:
-        client = self._clients.get(name)
-        if client is None:
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("MCP manager is shut down")
             config = self._configs.get(name)
             if config is None:
                 return None
-            client = MCPClient(config)
+            client = self._clients.get(name)
+            if client is None:
+                client = MCPClient(config)
             await client.connect()
             self._clients[name] = client
             return client
-
-        if not client.is_alive:
-            logger.info("Reconnecting MCP server '%s'", name)
-            await client.close()
-            client = MCPClient(self._configs[name])
-            await client.connect()
-            self._clients[name] = client
-
-        return client
 
     def tool_names_for_server(self, server_name: str) -> list[str]:
         """Use registry ownership, not a guessed tool-name prefix."""
@@ -122,6 +133,11 @@ class MCPManager:
 
 
     async def shutdown(self) -> None:
+        async with self._lifecycle_lock:
+            self._closed = True
+            await self._shutdown()
+
+    async def _shutdown(self) -> None:
         registry = self._registry
         if registry is not None:
             for name in self._configs:

@@ -160,6 +160,7 @@ class RemoteServer:
         self.agent_loader: AgentLoader | None = None
         self.agent_tool: AgentTool | None = None
         self.cron_runtime = None
+        self.workflow_runtime = None
         self.task_manager: DurableTaskManager | None = None
         self.trace_manager = TraceManager()
         self.harness = None
@@ -220,6 +221,7 @@ class RemoteServer:
         await asyncio.gather(*self._request_tasks, return_exceptions=True)
         self._request_tasks.clear()
         await close_resources([
+            ("workflow", self.workflow_runtime.close if self.workflow_runtime is not None else None),
             ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
             ("teams", self.team_manager.close if self.team_manager is not None else None),
         ])
@@ -360,6 +362,8 @@ class RemoteServer:
                     self._spawn_request(self._handle_plan_response(data))
 
                 elif msg_type == "cancel":
+                    if self.workflow_runtime is not None:
+                        self._spawn_request(self.workflow_runtime.cancel())
                     if self._cancel_event is not None:
                         self._cancel_event.set()
                         self.agent.cancel("Cancelled by remote client")
@@ -472,6 +476,9 @@ class RemoteServer:
         self.team_manager = self.harness.team_manager
         self.worktree_manager = self.harness.worktree_manager
         self.cron_runtime = self.harness.cron_runtime
+        self.workflow_runtime = self.harness.workflow_runtime
+        from valecode.commands.handlers.orchestration import create_orchestration_command
+        self.command_registry.register_sync(create_orchestration_command(self.workflow_runtime))
         from valecode.commands.handlers.worktree import create_worktree_command
         self.command_registry.register_sync(create_worktree_command(self.worktree_manager))
         from valecode.commands.handlers.cron import create_cron_command
@@ -628,6 +635,8 @@ class RemoteServer:
     ) -> None:
         """处理来自 Web UI 的用户消息或斜杠命令。"""
         if self._streaming:
+            if dispatch_commands and content.startswith("/workflow") and self.workflow_runtime is not None and self.workflow_runtime._running:
+                await self._handle_slash_command(content)
             return
         if self._pending_plan is not None:
             await self._broadcast({"type": "system", "data": {"message": "请先批准、修改或拒绝当前计划。"}})
@@ -816,6 +825,9 @@ class RemoteServer:
     async def _handle_slash_command(self, input_text: str) -> None:
         """分发斜杠命令。"""
         name, args, is_command = parse_command(input_text)
+        if self.workflow_runtime is not None and self.workflow_runtime._running and name not in {"workflow", "exit", "help"}:
+            self.add_system_message("工作流执行中；请先 /workflow cancel 或等待完成。")
+            return
         if not is_command or not name:
             return
 

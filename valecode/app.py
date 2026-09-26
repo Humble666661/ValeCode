@@ -651,6 +651,7 @@ class ValeCodeApp(App):
         self.agent_loader: AgentLoader | None = None
         self.agent_tool: AgentTool | None = None
         self.cron_runtime = None
+        self.workflow_runtime = None
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
         self.team_manager = None
@@ -916,6 +917,9 @@ class ValeCodeApp(App):
         self.agent_tool = self.harness.agent_tool
         self.team_manager = self.harness.team_manager
         self.cron_runtime = self.harness.cron_runtime
+        self.workflow_runtime = self.harness.workflow_runtime
+        from valecode.commands.handlers.orchestration import create_orchestration_command
+        self.command_registry.register_sync(create_orchestration_command(self.workflow_runtime))
         from valecode.commands.handlers.cron import create_cron_command
         self.command_registry.register_sync(create_cron_command(self.cron_runtime))
 
@@ -1078,6 +1082,10 @@ class ValeCodeApp(App):
         chat.remove_children()
 
     async def _dispatch_command(self, text: str) -> None:
+        if self.workflow_runtime is not None and self.workflow_runtime._running:
+            if not text.startswith(("/workflow", "/exit", "/help")):
+                self._show_system_message("工作流执行中；请先 /workflow cancel 或等待完成。")
+                return
         name, args, is_command = parse_command(text)
 
         if not is_command:
@@ -1359,6 +1367,8 @@ class ValeCodeApp(App):
             self.agent.set_skill_catalog("")
 
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
+        if self.workflow_runtime is not None and self.workflow_runtime._running:
+            return
         assert self.agent is not None
         self._refresh_skills_if_needed()
 
@@ -2019,6 +2029,7 @@ class ValeCodeApp(App):
         async def _cleanup() -> None:
             from valecode.runtime.harness import close_resources
             await close_resources([
+                ("workflow", self.workflow_runtime.close if self.workflow_runtime is not None else None),
                 ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
                 ("teams", self.team_manager.close if self.team_manager is not None else None),
             ])

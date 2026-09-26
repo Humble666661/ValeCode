@@ -191,6 +191,7 @@ class _PromptResources:
         self.mcp_manager = None
         self.task_manager = None
         self.cron_runtime = None
+        self.workflow_runtime = None
         self.team_manager = None
         self._closed = False
 
@@ -203,6 +204,7 @@ class _PromptResources:
         async def close_session():
             self.session.close()
         await close_resources([
+            ("workflow", self.workflow_runtime.close if self.workflow_runtime is not None else None),
             ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
             ("teams", self.team_manager.close if self.team_manager is not None else None),
             ("tasks", self.task_manager.shutdown if self.task_manager is not None else None),
@@ -364,6 +366,7 @@ async def _run_prompt(
     resources.task_manager = task_manager
     resources.team_manager = team_manager
     resources.cron_runtime = harness.cron_runtime
+    resources.workflow_runtime = harness.workflow_runtime
 
     def drain_notifications() -> list[str]:
         notes: list[str] = []

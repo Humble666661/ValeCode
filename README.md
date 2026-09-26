@@ -254,6 +254,12 @@ mcp_servers:
 需要终止时使用 `/tasks cancel <task-id>`。只恢复尚未开始的持久实例；已开始的定时
 任务中断后不自动从头重放，避免重复外部副作用。历史执行保留用于审计。
 
+## 持久工作流
+
+在 TUI 或 Remote 中运行 `/workflow run examples/workflows/review.yaml`；用 `/workflow list`、`/workflow status <id>` 查看，`/workflow resume <id>` 恢复同一会话/工作区的实例。也可在明确委托时调用 `Workflow` 工具。定义支持 `agent`、`branch`、`join` 节点、显式依赖、`when` 条件和 `{{steps.ID.output}}` 输出引用，不执行脚本或任意模板表达式。
+
+只读节点仅能使用内置 ReadFile/Glob/Grep，无 Hook、插件或 MCP；这些节点可并行和有界自动重试。写节点串行执行，保留正常权限，不继承临时会话授权。执行定义与节点输出保存到 SQLite；已成功节点不会重跑。中断节点需 `/workflow retry <id> <node> --confirm` 明确确认后才重试（可能重复已有副作用）；`/workflow cancel` 会等待活动子节点退出。节点具有轮次/超时上限，退出保留工作区文件；这不是文件系统回滚。
+
 ## 记忆召回
 
 记忆保存在用户或项目的 Markdown 文件中；大目录使用可重建的 SQLite FTS5 缓存缩小
@@ -402,7 +408,7 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **980 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **999 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
 

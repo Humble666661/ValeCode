@@ -1075,6 +1075,7 @@ class Agent:
             use_capacity=(
                 tool.uses_global_capacity if tool is not None else True
             ),
+            timeout=tool.execution_timeout if tool is not None else None,
         )
 
     def _prepare_event(self, event: AgentEvent) -> AgentEvent:

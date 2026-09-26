@@ -31,9 +31,11 @@ class HarnessComponents:
     worktree_manager: object
     trace_manager: object
     cron_runtime: object
+    workflow_runtime: object
 
     async def close(self):
         await close_resources([
+            ("workflow", self.workflow_runtime.close),
             ("cron", self.cron_runtime.close),
             ("teams", self.team_manager.close),
             ("tasks", self.task_manager.shutdown),
@@ -110,7 +112,12 @@ def assemble_harness(agent, session_manager, provider, registry, *, options=None
         lines.extend(["", "Background results arrive automatically; do not poll, sleep or duplicate work."])
         agent.set_agent_catalog("\n".join(lines), catalog_list=catalog)
     cron = install_cron(tool, registry, ready=cron_ready, start=False)
+    from valecode.runtime.node_runner import AgentNodeRunner
+    from valecode.runtime.workflow import WorkflowRuntime
+    from valecode.tools.workflow import WorkflowTool
+    workflow = WorkflowRuntime(tool, AgentNodeRunner(tool))
+    registry.register(WorkflowTool(workflow))
     tasks.start_maintenance()
     if cron_start:
         cron.start()
-    return HarnessComponents(loader, tool, tasks, teams, worktrees, traces, cron)
+    return HarnessComponents(loader, tool, tasks, teams, worktrees, traces, cron, workflow)

@@ -1,0 +1,28 @@
+version: 1
+name: read-only-review
+max_parallel: 2
+nodes:
+  - id: inspect
+    agent_type: Explore
+    read_only: true
+    max_turns: 8
+    prompt: 阅读 README.md，给出项目简介；若有测试说明，在结尾写 HAS_TESTS。
+  - id: has_tests
+    kind: branch
+    depends_on: [inspect]
+    condition: {step: inspect, operator: contains, value: HAS_TESTS}
+  - id: review_tests
+    agent_type: Explore
+    depends_on: [has_tests]
+    when: {step: has_tests, operator: equals, value: "true"}
+    read_only: true
+    prompt: "仅阅读并分析测试目录，不执行命令。此前发现：{{steps.inspect.output}}"
+  - id: suggest_tests
+    agent_type: Explore
+    depends_on: [has_tests]
+    when: {step: has_tests, operator: equals, value: "false"}
+    read_only: true
+    prompt: 仅阅读项目并给出补充测试建议，不修改文件。
+  - id: report
+    kind: join
+    depends_on: [review_tests, suggest_tests]

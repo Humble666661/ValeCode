@@ -29,6 +29,8 @@ class Tool(ABC):
     should_defer: bool = False
     search_terms: tuple[str, ...] = ()
     uses_global_capacity: bool = True
+    # Zero delegates deadlines to a bounded orchestration runtime, not cancellation.
+    execution_timeout: float | None = None
     max_output_chars: int = MAX_OUTPUT_CHARS
 
     @property

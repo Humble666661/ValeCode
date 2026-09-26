@@ -26,12 +26,12 @@ from valecode.persistence.migrations import MigrationError
 @pytest.fixture
 def database(tmp_path: Path) -> Database:
     database = Database(tmp_path / "control.db")
-    assert database.initialize() == 6
+    assert database.initialize() == 7
     return database
 
 
 def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
-    assert database.initialize() == 6
+    assert database.initialize() == 7
     with database.reader() as connection:
         tables = {
             row["name"]
@@ -60,14 +60,14 @@ def test_initialize_is_versioned_and_idempotent(database: Database) -> None:
         "schedules",
         "schedule_occurrences",
     }.issubset(tables)
-    assert version == 6
+    assert version == 7
     assert journal_mode == "wal"
     assert foreign_keys == 1
 
 
 def test_newer_database_version_is_rejected(tmp_path: Path) -> None:
     database = Database(tmp_path / "future.db")
-    assert database.initialize() == 6
+    assert database.initialize() == 7
     with database.transaction(immediate=True) as connection:
         connection.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) VALUES (99, 'future', 'now')"

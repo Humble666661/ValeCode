@@ -320,6 +320,27 @@ def _migration_006_schedules(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX idx_schedules_due ON schedules(session_id,status,next_run)")
 
 
+def _migration_007_orchestration(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE orchestrations (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('workflow','goal')),
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        work_dir TEXT NOT NULL, spec_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','running','blocked','failed','completed','cancelled')),
+        owner TEXT, lease_until REAL, epoch INTEGER NOT NULL DEFAULT 0,
+        state_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE orchestration_nodes (
+        instance_id TEXT NOT NULL REFERENCES orchestrations(id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','skipped','failed','blocked')),
+        attempts INTEGER NOT NULL DEFAULT 0, output TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY(instance_id,node_id)
+    )""")
+    connection.execute("CREATE INDEX idx_orchestrations_session ON orchestrations(session_id,kind,updated_at)")
+
+
 MIGRATIONS = (
     Migration(1, "initial_control_plane", _migration_001_initial_control_plane),
     Migration(2, "task_dependencies", _migration_002_task_dependencies),
@@ -327,6 +348,7 @@ MIGRATIONS = (
     Migration(4, "result_artifacts", _migration_004_result_artifacts),
     Migration(5, "team_state", _migration_005_team_state),
     Migration(6, "schedules", _migration_006_schedules),
+    Migration(7, "orchestration", _migration_007_orchestration),
 )
 
 

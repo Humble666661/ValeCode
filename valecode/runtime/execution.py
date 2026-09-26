@@ -121,12 +121,13 @@ class ExecutionController:
         token: CancellationToken,
         tool_name: str,
         use_capacity: bool = True,
+        timeout: float | None = None,
     ) -> T:
         if not use_capacity:
             return await self.wait(
                 factory(),
                 token=token,
-                timeout=self.limits.tool_timeout,
+                timeout=self.limits.tool_timeout if timeout is None else timeout,
                 operation=f"tool {tool_name}",
             )
         await self.wait(
@@ -138,7 +139,7 @@ class ExecutionController:
             return await self.wait(
                 factory(),
                 token=token,
-                timeout=self.limits.tool_timeout,
+                timeout=self.limits.tool_timeout if timeout is None else timeout,
                 operation=f"tool {tool_name}",
             )
         finally:

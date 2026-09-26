@@ -119,6 +119,8 @@ uv run pytest -q
 - 子 Agent 继承父级 ExecutionController，避免绕过全局工具并发额度。
 - 后台 Task 的 claim、lease、heartbeat、retry 和完成提交必须可由另一进程安全接管。
 - 创建异步任务时明确其所有者，并在正常退出、失败和取消路径回收资源。
+- Workflow 的 DAG、模板和分支由程序校验/执行，不能 eval 或让模型自行改执行图；只读并行限定 builtin ReadFile/Glob/Grep，写节点不自动重试。
+- 编排实例与节点提交受 owner/lease/epoch fencing 保护；中断的不确定节点要求显式确认重试，不把恢复等同于文件回滚。
 - MCP transport 与 `ClientSession` 的进入、请求和退出由同一个 owner task 执行；
   manager 持有共享连接，工具包装的 `close()` 只停止该包装的使用。重连保留 client
   对象身份；请求失败后不得自动重放可能产生外部副作用的调用。

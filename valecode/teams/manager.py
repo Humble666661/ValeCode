@@ -56,8 +56,7 @@ class TeamManager:
         teammate_mode: str = "",
         is_interactive: bool = True,
     ) -> BackendType:
-        if self._detected_backend is None:
-            self._detected_backend = detect_backend(teammate_mode, is_interactive)
+        self._detected_backend = detect_backend(teammate_mode, is_interactive)
         return self._detected_backend
 
 

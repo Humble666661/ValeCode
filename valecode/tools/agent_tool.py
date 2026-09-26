@@ -537,6 +537,19 @@ class AgentTool(Tool):
         if team is None:
             return ToolResult(output=f"Team '{p.team_name}' not found. Create it first with TeamCreate.", is_error=True)
 
+        from valecode.teams.backend_detect import BackendDetectionError
+
+        try:
+            backend = self._team_manager.detect_backend()
+        except BackendDetectionError as exc:
+            return ToolResult(output=str(exc), is_error=True)
+        if backend != BackendType.IN_PROCESS:
+            return ToolResult(
+                output="Independent pane teammates are not implemented. "
+                "Use teammate_mode: in-process.",
+                is_error=True,
+            )
+
         base_name = p.name or p.subagent_type or "worker"
         existing_names = {m.name for m in team.members}
         teammate_name = base_name
@@ -591,9 +604,6 @@ class AgentTool(Tool):
 
         # 3. 选择 LLM
         client = self._select_llm(p, definition)
-
-        # 4. 检测后端类型
-        backend = self._team_manager.detect_backend()
 
         # 5. 构建队友的工具集
         trace_node = self._trace_manager.create(

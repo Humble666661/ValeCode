@@ -30,7 +30,12 @@ def detect_backend(
     teammate_mode: str = "",
     is_interactive: bool = True,
 ) -> BackendType:
-    """Default to in-process for real-time progress tracking."""
+    """Only select backends supported by the current teammate runtime."""
+    if teammate_mode not in ("", "in-process"):
+        raise BackendDetectionError(
+            f"Unsupported teammate backend '{teammate_mode}': independent pane "
+            "workers are not implemented. Use teammate_mode: in-process."
+        )
     return BackendType.IN_PROCESS
 
 

@@ -839,6 +839,13 @@ class TestAgentNameRegistry:
 # =====================================================================
 
 class TestBackendDetect:
+    @pytest.mark.parametrize("mode", ["tmux", "iterm2", "auto", "invalid"])
+    def test_unsupported_runtime_rejected_after_default_detection(self, mode):
+        manager = TeamManager()
+        assert manager.detect_backend() == BackendType.IN_PROCESS
+        with pytest.raises(BackendDetectionError, match="not implemented"):
+            manager.detect_backend(mode)
+
     def test_in_process_mode(self):
         result = detect_backend(teammate_mode="in-process")
         assert result == BackendType.IN_PROCESS

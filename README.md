@@ -21,6 +21,7 @@ Teams、Git Worktree、持久化任务调度和 OpenTelemetry 链路追踪。
 - **多 Agent 协作**：支持 Sub-Agent、后台 Agent、Agent Team、结构化邮箱事件以及
   Git Worktree 隔离；共享任务板支持依赖、优先级与百分比进度，消息仅在所属 Team 内路由；
   TUI 可读取队友的实时工具、Token 与状态进度，Team 删除会收口实际运行中的进程内任务。
+  当前队友运行后端为 `in-process`；独立 tmux/iTerm2 worker 尚未支持。
 - **上下文与结果管理**：支持上下文压缩、可验证 Checkpoint、工具调用链对齐、
   超长结果卸载和引用感知清理。
 - **可观测性**：模型、工具、权限、Hook、压缩、恢复和任务调度均可输出

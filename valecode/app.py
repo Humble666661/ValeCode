@@ -652,6 +652,8 @@ class ValeCodeApp(App):
         self.agent_tool: AgentTool | None = None
         self.cron_runtime = None
         self.workflow_runtime = None
+        self.goal_runtime = None
+        self._orchestration_command_task = None
         self.task_manager: TaskManager = TaskManager()
         self.trace_manager: TraceManager = TraceManager()
         self.team_manager = None
@@ -726,6 +728,9 @@ class ValeCodeApp(App):
             self.query_one("#input-area").display = False
 
     def _select_provider(self, provider: ProviderConfig) -> None:
+        if any(runtime is not None and runtime._running for runtime in (self.workflow_runtime, self.goal_runtime)):
+            self._show_system_message("编排执行中不能切换模型；请先取消或等待结束。")
+            return
         self._selected_provider = provider
         try:
             self.client = create_client(provider)
@@ -918,8 +923,11 @@ class ValeCodeApp(App):
         self.team_manager = self.harness.team_manager
         self.cron_runtime = self.harness.cron_runtime
         self.workflow_runtime = self.harness.workflow_runtime
+        self.goal_runtime = self.harness.goal_runtime
         from valecode.commands.handlers.orchestration import create_orchestration_command
         self.command_registry.register_sync(create_orchestration_command(self.workflow_runtime))
+        from valecode.tools.goal import GoalTool
+        self.command_registry.register_sync(create_orchestration_command(self.goal_runtime, "goal", GoalTool))
         from valecode.commands.handlers.cron import create_cron_command
         self.command_registry.register_sync(create_cron_command(self.cron_runtime))
 
@@ -1082,9 +1090,9 @@ class ValeCodeApp(App):
         chat.remove_children()
 
     async def _dispatch_command(self, text: str) -> None:
-        if self.workflow_runtime is not None and self.workflow_runtime._running:
-            if not text.startswith(("/workflow", "/exit", "/help")):
-                self._show_system_message("工作流执行中；请先 /workflow cancel 或等待完成。")
+        if any(runtime is not None and runtime._running for runtime in (self.workflow_runtime, self.goal_runtime)):
+            if not text.startswith(("/workflow", "/goal", "/exit", "/help")):
+                self._show_system_message("编排执行中；请先 /workflow cancel 或 /goal cancel，或等待完成。")
                 return
         name, args, is_command = parse_command(text)
 
@@ -1116,10 +1124,23 @@ class ValeCodeApp(App):
             return
 
         ctx = self._build_command_context(args)
-        try:
-            await cmd.handler(ctx)
-        except Exception as e:
-            self._show_error(f"命令执行失败: {e}")
+        async def handle():
+            try:
+                await cmd.handler(ctx)
+            except asyncio.CancelledError:
+                self._show_system_message("编排已中断，状态已保存；中断节点重试需明确确认。")
+            except Exception as e:
+                self._show_error(f"命令执行失败: {e}")
+        if name in {"workflow", "goal"} and args.split(maxsplit=1)[:1] in (["run"], ["resume"], ["retry"]):
+            if self._streaming or (self._orchestration_command_task is not None and not self._orchestration_command_task.done()):
+                self._show_system_message("请先等待当前执行结束或中断它。")
+                return
+            self._orchestration_command_task = asyncio.create_task(handle())
+            # Release the Textual event handler while the owned task runs, so
+            # status/cancel/exit and rendering stay responsive.
+            await asyncio.sleep(0)
+        else:
+            await handle()
 
     # -----------------------------------------------------------------
     # 输入处理
@@ -1127,6 +1148,9 @@ class ValeCodeApp(App):
 
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.text.strip()
+        if any(runtime is not None and runtime._running for runtime in (self.workflow_runtime, self.goal_runtime)) and not text.startswith("/"):
+            self._show_system_message("编排执行中，普通消息不会替换执行；请使用 /workflow cancel 或 /goal cancel。")
+            return
         if self._streaming and not text.startswith("/"):
             if self._agent_task and not self._agent_task.done():
                 self.agent.cancel("Response superseded by new input")
@@ -1225,6 +1249,9 @@ class ValeCodeApp(App):
         if popup.is_visible:
             popup.hide()
             self.query_one("#chat-input", ChatInput).focus()
+            return
+        if self._orchestration_command_task is not None and not self._orchestration_command_task.done():
+            self._orchestration_command_task.cancel()
             return
         if self._agent_task and not self._agent_task.done():
             if self._subagent_task and not self._subagent_task.done():
@@ -1367,7 +1394,7 @@ class ValeCodeApp(App):
             self.agent.set_skill_catalog("")
 
     async def _send_message(self, text: str, is_notification: bool = False) -> None:
-        if self.workflow_runtime is not None and self.workflow_runtime._running:
+        if any(runtime is not None and runtime._running for runtime in (self.workflow_runtime, self.goal_runtime)):
             return
         assert self.agent is not None
         self._refresh_skills_if_needed()
@@ -2007,6 +2034,11 @@ class ValeCodeApp(App):
     # -----------------------------------------------------------------
 
     async def action_handle_ctrl_c(self) -> None:
+        if self._orchestration_command_task is not None and not self._orchestration_command_task.done():
+            self._orchestration_command_task.cancel()
+            await asyncio.gather(self._orchestration_command_task, return_exceptions=True)
+            self._finish_streaming()
+            return
         if self._streaming:
             if self._agent_task and not self._agent_task.done():
                 self.agent.cancel("Cancelled by user")
@@ -2028,8 +2060,12 @@ class ValeCodeApp(App):
 
         async def _cleanup() -> None:
             from valecode.runtime.harness import close_resources
+            if self._orchestration_command_task is not None and not self._orchestration_command_task.done():
+                self._orchestration_command_task.cancel()
+                await asyncio.gather(self._orchestration_command_task, return_exceptions=True)
             await close_resources([
                 ("workflow", self.workflow_runtime.close if self.workflow_runtime is not None else None),
+                ("goal", self.goal_runtime.close if self.goal_runtime is not None else None),
                 ("cron", self.cron_runtime.close if self.cron_runtime is not None else None),
                 ("teams", self.team_manager.close if self.team_manager is not None else None),
             ])
@@ -2092,6 +2128,9 @@ class ValeCodeApp(App):
 
     async def _exit_from_command(self) -> None:
         """让 /exit 在有回复生成时也能直接执行完整退出流程。"""
+        if self._orchestration_command_task is not None and not self._orchestration_command_task.done():
+            self._orchestration_command_task.cancel()
+            await asyncio.gather(self._orchestration_command_task, return_exceptions=True)
         if self._streaming:
             if self._agent_task and not self._agent_task.done():
                 if self.agent is not None:

@@ -1,0 +1,15 @@
+version: 1
+objective: 阅读 README.md，确认项目名称与安装说明完整。不修改文件。
+agent_type: general-purpose
+worker_read_only: true
+max_rounds: 2
+max_tokens: 10000
+max_seconds: 300
+criteria:
+  - id: project_name
+    description: README 中使用 ValeCode 项目名称。
+    evidence_files: [README.md]
+    contains: ValeCode
+  - id: installation
+    description: README 中存在清晰的本地安装和启动说明。
+    evidence_files: [README.md]

@@ -260,6 +260,16 @@ mcp_servers:
 
 只读节点仅能使用内置 ReadFile/Glob/Grep，无 Hook、插件或 MCP；这些节点可并行和有界自动重试。写节点串行执行，保留正常权限，不继承临时会话授权。执行定义与节点输出保存到 SQLite；已成功节点不会重跑。中断节点需 `/workflow retry <id> <node> --confirm` 明确确认后才重试（可能重复已有副作用）；`/workflow cancel` 会等待活动子节点退出。节点具有轮次/超时上限，退出保留工作区文件；这不是文件系统回滚。
 
+## 目标验收与有界续跑
+
+使用 `/goal run examples/goals/readme-review.yaml` 显式创建目标；`/goal list`、`/goal status <id>` 查看，`/goal resume <id>` 恢复，`/goal cancel` 中断。也可明确委托主 Agent 使用 `Goal` 工具。普通对话不会自动开启目标循环。
+
+目标 YAML 声明 `objective`、`criteria`（每条有唯一 `id`、`description`、工作区相对 `evidence_files`，可选 `contains` 硬检查）及预算。程序驱动“执行 → 独立只读验证 → 反馈 → 有界续跑”；验收需要本轮成功完整 ReadFile 证据与文件内容摘要，不能只凭执行者自称 PASS。验证器不共享执行者对话，只使用 builtin ReadFile/Glob/Grep，无 Hook、插件、MCP 或 shell。
+
+默认最多 9 轮（首轮加 8 次续跑），相同产物/达标项连续 2 次无进展后停止；只有 `goal_not_met_yet` 会继续。缺证据、外部等待、需要用户授权、阶段失败或预算不足均保存为 blocked，而非完成。worker 使用正常权限、不继承临时会话授权；需要人工授权的写入会停止，可配置适当的明确项目规则后 `/goal retry <id> <phase> --confirm`。成功 worker 不重放，重试累计已报告用量。TUI 运行时可查询、取消、Esc/Ctrl+C 和安全退出。
+
+时间按实际阶段执行累计，并限制每个阶段；token 按模型已报告用量在阶段间检查，单阶段可能超出预算，未返回 usage 的供应商用量无法精确计入。当前验收适用于完整 UTF-8 文本产物（<=128 KB、读取行数范围内）；语义标准由独立模型判断，并非形式化证明。验证器不会独立执行测试命令或验证 GUI，也不把文件里的测试报告当作真实运行证明。
+
 ## 记忆召回
 
 记忆保存在用户或项目的 Markdown 文件中；大目录使用可重建的 SQLite FTS5 缓存缩小
@@ -408,9 +418,11 @@ uv sync --group dev
 uv run pytest -q
 ```
 
-当前回归基线为 **999 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
+当前回归基线为 **1038 passed, 1 skipped**。测试覆盖数据库迁移与状态机、崩溃恢复、
 任务 lease 与接管、事件一致性、模型重试、循环熔断、工具 Registry、权限与 Skills、
 Hooks、Worktree 边界、沙箱以及 Trace 传播。
+
+额外覆盖工作流 DAG/分支/只读并行、跨进程租约、节点不重放，以及目标独立验收、实际工具证据、预算/无进展停止和 TUI 长命令取消。
 
 仓库级开发约定见 [VALECODE.md](VALECODE.md)。
 

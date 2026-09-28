@@ -12,7 +12,10 @@ def create_orchestration_command(runtime, name="workflow", tool_type=WorkflowToo
         try:
             if getattr(ctx.session, "session_id", "") != runtime.scope()[0]:
                 raise ValueError("没有匹配的活动会话")
-            parts = shlex.split(ctx.args, posix=True)
+            # Quoted Windows paths must preserve backslashes, unlike a POSIX
+            # shell. Commands are parsed as arguments only; no shell is invoked.
+            parts = shlex.split(ctx.args, posix=False)
+            parts = [part[1:-1] if len(part) >= 2 and part[0] == part[-1] and part[0] in {"'", '"'} else part for part in parts]
             action = parts[0] if parts else "list"
             values = {"action": action}
             if action in {"list", "cancel"} and len(parts) <= 1:
@@ -26,7 +29,7 @@ def create_orchestration_command(runtime, name="workflow", tool_type=WorkflowToo
             else:
                 raise ValueError(usage + "；重试可能重复写入，必须显式加 --confirm")
             changing = action in {"run", "resume", "retry"}
-            if changing and (runtime._running or getattr(ctx.ui, "_streaming", False)):
+            if changing and (any(peer._running for peer in getattr(runtime, "_peers", (runtime,))) or getattr(ctx.ui, "_streaming", False)):
                 raise ValueError("请先等待当前执行结束")
             if changing:
                 ctx.ui._streaming = True

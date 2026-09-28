@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -97,7 +98,19 @@ class OrchestrationStore:
             raise ValueError("Node output exceeds 64000 characters")
         with self.database.transaction(immediate=True) as db:
             self._fence(db, identity, owner, epoch)
-            cursor = db.execute("UPDATE orchestration_nodes SET status=?,output=?,error=?,metadata_json=? WHERE instance_id=? AND node_id=? AND status='running'", (status, output, error[:2000], encode(metadata or {}), identity, node))
+            previous = db.execute("SELECT metadata_json FROM orchestration_nodes WHERE instance_id=? AND node_id=?", (identity, node)).fetchone()
+            previous = json.loads(previous[0]) if previous else {}
+            metadata = dict(metadata or {})
+            for key in ("input_tokens", "output_tokens"):
+                value = metadata.get(key, 0)
+                if type(value) is not int or value < 0:
+                    raise ValueError("Node usage must be nonnegative integer tokens")
+            seconds = metadata.get("elapsed_seconds", 0)
+            if isinstance(seconds, bool) or not isinstance(seconds, (float, int)) or not math.isfinite(seconds) or seconds < 0:
+                raise ValueError("Node duration must be finite and nonnegative")
+            metadata["spent_tokens"] = previous.get("spent_tokens", 0) + metadata.get("input_tokens", 0) + metadata.get("output_tokens", 0)
+            metadata["spent_seconds"] = previous.get("spent_seconds", 0) + metadata.get("elapsed_seconds", 0)
+            cursor = db.execute("UPDATE orchestration_nodes SET status=?,output=?,error=?,metadata_json=? WHERE instance_id=? AND node_id=? AND status='running'", (status, output, error[:2000], encode(metadata), identity, node))
             if cursor.rowcount != 1:
                 raise ValueError("Node was not running")
 
@@ -106,6 +119,22 @@ class OrchestrationStore:
         with self.database.transaction(immediate=True) as db:
             self._fence(db, identity, owner, epoch)
             db.execute("UPDATE orchestrations SET state_json=?,updated_at=? WHERE id=?", (snapshot, time.time(), identity))
+
+    def add_node(self, identity, node, owner, epoch):
+        self.add_nodes(identity, [node], owner, epoch)
+
+    def add_nodes(self, identity, nodes, owner, epoch):
+        with self.database.transaction(immediate=True) as db:
+            self._fence(db, identity, owner, epoch)
+            for node in nodes:
+                db.execute("INSERT INTO orchestration_nodes(instance_id,node_id,status) VALUES(?,?,'pending') ON CONFLICT DO NOTHING", (identity, node))
+
+    def invalidate_node(self, identity, node, owner, epoch, reason):
+        with self.database.transaction(immediate=True) as db:
+            self._fence(db, identity, owner, epoch)
+            cursor = db.execute("UPDATE orchestration_nodes SET status='blocked',error=? WHERE instance_id=? AND node_id=? AND status='succeeded'", (reason[:2000], identity, node))
+            if cursor.rowcount != 1:
+                raise ValueError("Only a finished verifier may be invalidated")
 
     def finish(self, identity, owner, epoch, status, error=""):
         if status not in {"blocked", "failed", "completed", "cancelled"}:
@@ -124,7 +153,10 @@ class OrchestrationStore:
             row = db.execute("SELECT * FROM orchestrations WHERE id=?", (identity,)).fetchone()
             if row is None or row["status"] in {"completed", "cancelled"} or (row["owner"] and row["lease_until"] > time.time()):
                 raise ValueError("Instance is not available for retry")
-            cursor = db.execute("UPDATE orchestration_nodes SET status='pending',error='',output='',metadata_json='{}' WHERE instance_id=? AND node_id=? AND status IN ('blocked','failed')", (identity, node))
+            previous = db.execute("SELECT metadata_json FROM orchestration_nodes WHERE instance_id=? AND node_id=?", (identity, node)).fetchone()
+            spent = json.loads(previous[0]) if previous else {}
+            counters = {key: spent.get(key, 0) for key in ("spent_tokens", "spent_seconds")}
+            cursor = db.execute("UPDATE orchestration_nodes SET status='pending',error='',output='',metadata_json=? WHERE instance_id=? AND node_id=? AND status IN ('blocked','failed')", (encode(counters), identity, node))
             if cursor.rowcount != 1:
                 raise ValueError("Only blocked/failed nodes may be retried")
             db.execute("UPDATE orchestrations SET status='pending',error='',owner=NULL,lease_until=NULL,updated_at=? WHERE id=?", (time.time(), identity))

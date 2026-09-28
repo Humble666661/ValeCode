@@ -32,10 +32,12 @@ class HarnessComponents:
     trace_manager: object
     cron_runtime: object
     workflow_runtime: object
+    goal_runtime: object
 
     async def close(self):
         await close_resources([
             ("workflow", self.workflow_runtime.close),
+            ("goal", self.goal_runtime.close),
             ("cron", self.cron_runtime.close),
             ("teams", self.team_manager.close),
             ("tasks", self.task_manager.shutdown),
@@ -116,8 +118,13 @@ def assemble_harness(agent, session_manager, provider, registry, *, options=None
     from valecode.runtime.workflow import WorkflowRuntime
     from valecode.tools.workflow import WorkflowTool
     workflow = WorkflowRuntime(tool, AgentNodeRunner(tool))
+    from valecode.runtime.goal import GoalRuntime
+    from valecode.tools.goal import GoalTool
+    goal = GoalRuntime(tool, AgentNodeRunner(tool))
+    workflow._peers = goal._peers = (workflow, goal)
     registry.register(WorkflowTool(workflow))
+    registry.register(GoalTool(goal))
     tasks.start_maintenance()
     if cron_start:
         cron.start()
-    return HarnessComponents(loader, tool, tasks, teams, worktrees, traces, cron, workflow)
+    return HarnessComponents(loader, tool, tasks, teams, worktrees, traces, cron, workflow, goal)

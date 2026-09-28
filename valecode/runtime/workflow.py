@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from valecode.persistence.orchestration_store import OrchestrationStore, LeaseLost
 
@@ -65,6 +65,13 @@ class WorkflowDefinition(BaseModel):
     max_parallel: int = Field(default=4, ge=1, le=8)
     nodes: list[WorkflowNode] = Field(min_length=1, max_length=32)
 
+    @field_validator("version", mode="before")
+    @classmethod
+    def version_number(cls, value):
+        if type(value) is not int:
+            raise ValueError("Version must be an integer, not a boolean")
+        return value
+
     @model_validator(mode="after")
     def dag(self):
         nodes = {node.id: node for node in self.nodes}
@@ -100,6 +107,7 @@ class WorkflowDefinition(BaseModel):
 
 
 class WorkflowRuntime:
+    kind = "workflow"
     def __init__(self, agent_tool, runner):
         self.agent_tool = agent_tool
         self.runner = runner

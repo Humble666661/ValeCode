@@ -121,6 +121,8 @@ uv run pytest -q
 - 创建异步任务时明确其所有者，并在正常退出、失败和取消路径回收资源。
 - Workflow 的 DAG、模板和分支由程序校验/执行，不能 eval 或让模型自行改执行图；只读并行限定 builtin ReadFile/Glob/Grep，写节点不自动重试。
 - 编排实例与节点提交受 owner/lease/epoch fencing 保护；中断的不确定节点要求显式确认重试，不把恢复等同于文件回滚。
+- Goal 只在明确委托后运行。独立 verifier 不共享 worker 上下文或写工具/Hook/Plugin/MCP；验收引用本轮真实成功的完整文件读取，不接受裸 PASS 或伪造证据 ID。
+- 只有 goal_not_met_yet 可以有界续跑；权限/外部等待/缺证据/无进展/预算不足必须保存并停止，不能标为完成。重试不重置已报告用量；阶段间 token 预算不等于供应商硬截断。
 - MCP transport 与 `ClientSession` 的进入、请求和退出由同一个 owner task 执行；
   manager 持有共享连接，工具包装的 `close()` 只停止该包装的使用。重连保留 client
   对象身份；请求失败后不得自动重放可能产生外部副作用的调用。

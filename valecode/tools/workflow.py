@@ -30,21 +30,21 @@ class WorkflowTool(Tool):
     async def execute(self, params):
         try:
             if params.action == "list":
-                result = self.runtime.store.list(*self.runtime.scope(), "workflow")
+                result = self.runtime.store.list(*self.runtime.scope(), self.runtime.kind)
             elif params.action == "status":
                 result = self.runtime.status(params.instance_id)
             elif params.action == "cancel":
                 await self.runtime.cancel()
                 result = {"status": "interrupted", "note": "中断节点需明确确认后才能重试"}
             else:
-                if self.runtime._running:
-                    raise ValueError("已有工作流正在执行")
+                if any(runtime._running for runtime in getattr(self.runtime, "_peers", (self.runtime,))):
+                    raise ValueError("已有工作流或目标正在执行")
                 identity = params.instance_id
                 if params.action == "run":
                     identity = self.runtime.create(self.runtime.load(params.path))
                 elif params.action == "retry":
                     self.runtime.retry(identity, params.node_id, params.confirm_retry)
                 result = await self.runtime.run(identity)
-            return ToolResult(json.dumps(result, ensure_ascii=False))
+            return ToolResult(json.dumps(result, ensure_ascii=False), is_error=isinstance(result, dict) and result.get("status") == "blocked")
         except (ValueError, KeyError, OSError, RuntimeError) as exc:
             return ToolResult(str(exc), is_error=True)

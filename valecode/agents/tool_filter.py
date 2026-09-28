@@ -18,6 +18,7 @@ ALL_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "TaskStop",
     "Workflow",
     "TodoWrite",
+    "Goal",
     "TaskCreate",
     "TaskGet",
     "TaskList",
@@ -37,6 +38,7 @@ CUSTOM_AGENT_DISALLOWED_TOOLS: frozenset[str] = frozenset({
     "AskUserQuestion",
     "TaskStop",
     "Workflow",
+    "Goal",
 })
 
 ASYNC_AGENT_ALLOWED_TOOLS: frozenset[str] = frozenset({
